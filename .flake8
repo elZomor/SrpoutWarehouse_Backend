@@ -1,0 +1,9 @@
+[flake8]
+max-line-length = 88
+extend-ignore = E203, W503
+exclude = .venv,migrations,__pycache__
+per-file-ignores =
+    inventory/admin.py:F401
+    inventory/models.py:F401
+    inventory/tests.py:F401
+    inventory/views.py:F401

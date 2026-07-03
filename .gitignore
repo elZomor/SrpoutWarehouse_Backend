@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+media/
+
+# Postgres data volume (if ever bind-mounted locally instead of a named volume)
+pgdata/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+.claude/
