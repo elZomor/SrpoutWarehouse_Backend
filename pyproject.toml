@@ -6,3 +6,21 @@ extend-exclude = '''
   | \.venv
 )/
 '''
+
+[tool.bandit]
+exclude_dirs = [".venv", "migrations", "tests"]
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+  ".venv/*",
+  "manage.py",
+  "*/migrations/*",
+  "*/tests.py",
+  "*/tests/*",
+  "sprout_warehouse/asgi.py",
+  "sprout_warehouse/wsgi.py",
+]
+
+[tool.coverage.report]
+fail_under = 50

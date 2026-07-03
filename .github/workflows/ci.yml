@@ -25,6 +25,24 @@ jobs:
       - name: Run flake8
         run: flake8 .
 
+  review-bot:
+    name: Review Bot (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run bandit
+        run: bandit -c pyproject.toml -r .
+
   test:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -50,5 +68,8 @@ jobs:
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run
 
-      - name: Run tests
-        run: python manage.py test
+      - name: Run tests with coverage
+        run: coverage run manage.py test
+
+      - name: Enforce coverage threshold
+        run: coverage report
