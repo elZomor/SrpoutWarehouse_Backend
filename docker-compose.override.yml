@@ -1,0 +1,10 @@
+# Local-dev-only convenience, auto-merged by `docker compose up` on top of
+# docker-compose.yml. Bind-mounts the repo into the container so `web` (which
+# already runs `manage.py runserver` when DEBUG=True, per entrypoint.sh) picks
+# up code/.env changes live via Django's autoreloader - no more `--build` on
+# every edit. Not used anywhere in CI; safe to delete if you want the plain
+# build-once behavior back.
+services:
+  web:
+    volumes:
+      - .:/app

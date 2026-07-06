@@ -43,6 +43,8 @@ docker compose down
 
 `db/init/01-init-superuser.sh` only runs the first time the `pgdata` volume is initialized (empty data dir) — it creates an *additional* PostgreSQL superuser role (`DB_SUPERUSER_NAME`/`DB_SUPERUSER_PASSWORD` from `.env`), separate from the app's own `POSTGRES_USER` role. To re-run it, drop the volume (`docker compose down -v`) and bring the stack back up.
 
+`docker-compose.override.yml` is auto-merged on top of `docker-compose.yml` by plain `docker compose up` (no flags needed) and bind-mounts the repo into `web`, so code/`.env` edits are picked up live by `runserver`'s autoreloader — no `--build` needed after the first build. Local-dev-only; nothing else in the repo (CI included) references it.
+
 ## Common commands
 
 These assume a local virtualenv with a reachable Postgres (see Environment above); inside Docker use `docker compose exec web ...` instead.

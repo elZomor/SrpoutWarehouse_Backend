@@ -10,6 +10,12 @@ from inventory.serializers import LoginSerializer, UserSerializer
 
 
 class LoginView(APIView):
+    # No session exists yet, so the browser has no CSRF cookie to send back -
+    # SessionAuthentication.enforce_csrf() would otherwise 403 this request
+    # anyway, since AnonymousUser.is_active is True and it runs the check
+    # regardless of whether anyone is actually logged in. Login itself
+    # doesn't need an authenticator.
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
