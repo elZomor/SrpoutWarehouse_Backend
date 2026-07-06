@@ -71,7 +71,22 @@ INSTALLED_APPS = [
     "corsheaders",
     "django_filters",
     "django_extensions",
+    "rest_framework",
+    "inventory",
 ]
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
+
+# Session cookie must not be readable from JS (WRH-18 TC-07); this is Django's
+# default, made explicit here since it's a documented security requirement.
+SESSION_COOKIE_HTTPONLY = True
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
