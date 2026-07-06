@@ -51,6 +51,12 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 
+# Sessions (Technical Notes v1.0, open questions #1-2): DB-backed since Postgres is
+# already required infra and there's no Redis in docker-compose.yml for this MVP's
+# single-account-per-company scale. Session/cookie expires after 1 day.
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_AGE = 60 * 60 * 24
+
 
 # Application definition
 
