@@ -68,7 +68,11 @@ class MeView(APIView):
 
 
 class ProductTypeViewSet(viewsets.ModelViewSet):
-    queryset = ProductType.objects.all().order_by("name")
+    # WRH-20 only scopes create/list/search; archive/delete semantics are a
+    # separate story (US-002b), so update/delete aren't exposed yet.
+    http_method_names = ["get", "post", "head", "options"]
+    permission_classes = [IsAuthenticated]
+    queryset = ProductType.objects.all()
     serializer_class = ProductTypeSerializer
     filter_backends = [SearchFilter]
-    search_fields = ["name", "model_code"]
+    search_fields = ProductType.SEARCH_FIELDS

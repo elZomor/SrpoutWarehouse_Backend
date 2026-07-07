@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from inventory.tests.factories import ProductTypeFactory
 
@@ -36,6 +36,29 @@ class ProductTypeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["model_code"], "")
         self.assertEqual(response.data["description"], "")
+
+    def test_create_product_type_succeeds_via_real_csrf_flow(self):
+        # force_authenticate (used by every other test here) bypasses CSRF
+        # entirely, so it can't prove a real browser session - which must
+        # send X-CSRFToken - can actually create a product type.
+        password = "correct-horse-battery-staple"
+        User.objects.create_user(
+            username="csrf-jane", email="csrf-jane@example.com", password=password
+        )
+        client = APIClient(enforce_csrf_checks=True)
+        client.post(
+            reverse("login"),
+            {"email": "csrf-jane@example.com", "password": password},
+        )
+        csrf_token = client.cookies["csrftoken"].value
+
+        response = client.post(
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A"},
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_create_product_type_without_name_is_rejected(self):
         response = self.client.post(reverse("producttype-list"), {})
