@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 
 class LoginTests(APITestCase):
@@ -33,6 +33,21 @@ class LoginTests(APITestCase):
 
         self.assertEqual(response.data["first_name"], "Jane")
         self.assertEqual(response.data["username"], "jane")
+
+    def test_login_succeeds_without_a_pre_existing_csrf_cookie(self):
+        # A real browser has no CSRF cookie before its first request ever.
+        # DRF's default test client (self.client) sets enforce_csrf_checks=
+        # False, which was masking a real 403: SessionAuthentication.
+        # enforce_csrf() runs even for anonymous requests (AnonymousUser.
+        # is_active is True), so LoginView must not use that authenticator.
+        client = APIClient(enforce_csrf_checks=True)
+
+        response = client.post(
+            reverse("login"),
+            {"email": self.user.email, "password": self.password},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_login_with_wrong_password_is_rejected(self):
         response = self.client.post(
