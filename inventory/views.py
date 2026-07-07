@@ -1,12 +1,14 @@
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.middleware.csrf import get_token
-from rest_framework import status
+from rest_framework import mixins, status, viewsets
+from rest_framework.filters import SearchFilter
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from inventory.serializers import LoginSerializer, UserSerializer
+from inventory.models import ProductType
+from inventory.serializers import LoginSerializer, ProductTypeSerializer, UserSerializer
 
 
 class LoginView(APIView):
@@ -63,3 +65,17 @@ class MeView(APIView):
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class ProductTypeViewSet(
+    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    # WRH-20 (PRD story US-002a) only scopes create/list/search; retrieve,
+    # update, and archive/delete semantics are a separate PRD story
+    # (US-002b), so only list+create are mixed in - no retrieve/update/
+    # destroy routes get registered at all.
+    permission_classes = [IsAuthenticated]
+    queryset = ProductType.objects.all()
+    serializer_class = ProductTypeSerializer
+    filter_backends = [SearchFilter]
+    search_fields = ProductType.SEARCH_FIELDS
