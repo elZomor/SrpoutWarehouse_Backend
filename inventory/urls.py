@@ -1,9 +1,10 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from inventory.views import LoginView, LogoutView, MeView
+from inventory.views import LoginView, LogoutView, MeView, ProductTypeViewSet
 
 router = DefaultRouter()
+router.register("product-types", ProductTypeViewSet)
 
 urlpatterns = [
     path("auth/login/", LoginView.as_view(), name="login"),
