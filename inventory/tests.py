@@ -13,6 +13,8 @@ class LoginTests(APITestCase):
             password=self.password,
             first_name="Jane",
         )
+        self.unregistered_email = "nobody@example.com"
+        self.unregistered_password = "whatever-password"
 
     def test_login_with_valid_credentials_succeeds(self):
         # TC-01: successful login with valid credentials
@@ -50,12 +52,56 @@ class LoginTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_login_with_wrong_password_is_rejected(self):
+        # WRH-19 TC-06: correct email, wrong password -> generic error
         response = self.client.post(
             reverse("login"),
             {"email": self.user.email, "password": "wrong-password"},
         )
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["detail"], "Invalid email or password.")
+
+    def test_login_with_unregistered_email_is_rejected(self):
+        # WRH-19 TC-05: unregistered email -> same generic error, no session
+        response = self.client.post(
+            reverse("login"),
+            {"email": self.unregistered_email, "password": self.unregistered_password},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["detail"], "Invalid email or password.")
+
+    def test_error_message_identical_for_unregistered_email_and_wrong_password(self):
+        # WRH-19 TC-07: byte-identical messages across failure modes, so a
+        # client can't tell which field was wrong (prevents account
+        # enumeration).
+        unregistered_response = self.client.post(
+            reverse("login"),
+            {"email": self.unregistered_email, "password": self.unregistered_password},
+        )
+        wrong_password_response = self.client.post(
+            reverse("login"),
+            {"email": self.user.email, "password": "wrong-password"},
+        )
+
+        self.assertEqual(
+            unregistered_response.data["detail"], wrong_password_response.data["detail"]
+        )
+
+    def test_no_session_cookie_on_failed_login(self):
+        # WRH-19 TC-08: failed login attempts never create a server-side
+        # session.
+        unregistered_response = self.client.post(
+            reverse("login"),
+            {"email": self.unregistered_email, "password": self.unregistered_password},
+        )
+        wrong_password_response = self.client.post(
+            reverse("login"),
+            {"email": self.user.email, "password": "wrong-password"},
+        )
+
+        self.assertNotIn("sessionid", unregistered_response.cookies)
+        self.assertNotIn("sessionid", wrong_password_response.cookies)
 
     def test_session_cookie_is_httponly(self):
         # TC-07: session token must not be readable from JS
