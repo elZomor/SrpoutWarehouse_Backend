@@ -8,7 +8,10 @@ from inventory.tests.factories import ProductTypeFactory
 
 class ProductTypeTests(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username="jane", password="irrelevant")
+        self.password = "correct-horse-battery-staple"
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password=self.password
+        )
         self.client.force_authenticate(user=self.user)
 
     def test_create_product_type_with_all_fields(self):
@@ -41,15 +44,12 @@ class ProductTypeTests(APITestCase):
         # force_authenticate (used by every other test here) bypasses CSRF
         # entirely, so it can't prove a real browser session - which must
         # send X-CSRFToken - can actually create a product type.
-        password = "correct-horse-battery-staple"
-        User.objects.create_user(
-            username="csrf-jane", email="csrf-jane@example.com", password=password
-        )
         client = APIClient(enforce_csrf_checks=True)
-        client.post(
+        login_response = client.post(
             reverse("login"),
-            {"email": "csrf-jane@example.com", "password": password},
+            {"email": self.user.email, "password": self.password},
         )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
         csrf_token = client.cookies["csrftoken"].value
 
         response = client.post(
@@ -59,6 +59,44 @@ class ProductTypeTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_create_product_type_is_rejected_without_csrf_token(self):
+        # A real session without the X-CSRFToken header must still be
+        # rejected - proves CSRF enforcement is actually active on this
+        # endpoint, not just that it succeeds when the token is sent.
+        client = APIClient(enforce_csrf_checks=True)
+        login_response = client.post(
+            reverse("login"),
+            {"email": self.user.email, "password": self.password},
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+        response = client.post(reverse("producttype-list"), {"name": "Bar LED Model A"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_detail_route_is_not_registered(self):
+        # ProductTypeViewSet only mixes in list+create, so no retrieve/
+        # update/destroy route exists at all for /product-types/<pk>/ -
+        # WRH-20 only scopes create/list/search; that surface is a
+        # separate story (PRD US-002b) and must not be reachable yet.
+        product_type = ProductTypeFactory()
+        detail_url = f"/api/product-types/{product_type.pk}/"
+
+        self.assertEqual(
+            self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND
+        )
+        self.assertEqual(
+            self.client.put(detail_url, {"name": "New Name"}).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.patch(detail_url, {"name": "New Name"}).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND
+        )
 
     def test_create_product_type_without_name_is_rejected(self):
         response = self.client.post(reverse("producttype-list"), {})

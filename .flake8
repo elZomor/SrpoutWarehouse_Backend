@@ -5,5 +5,5 @@ exclude = .venv,migrations,__pycache__
 per-file-ignores =
     inventory/admin.py:F401
     inventory/models.py:F401
-    inventory/tests/*.py:F401
+    inventory/tests/test_auth.py:F401
     inventory/views.py:F401

@@ -18,8 +18,8 @@ RUN apt-get update \
         fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-dev.txt .
-RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 RUN chmod +x entrypoint.sh
