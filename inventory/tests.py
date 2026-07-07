@@ -13,6 +13,8 @@ class LoginTests(APITestCase):
             password=self.password,
             first_name="Jane",
         )
+        self.unregistered_email = "nobody@example.com"
+        self.unregistered_password = "whatever-password"
 
     def test_login_with_valid_credentials_succeeds(self):
         # TC-01: successful login with valid credentials
@@ -63,7 +65,7 @@ class LoginTests(APITestCase):
         # WRH-19 TC-05: unregistered email -> same generic error, no session
         response = self.client.post(
             reverse("login"),
-            {"email": "nobody@example.com", "password": "whatever-password"},
+            {"email": self.unregistered_email, "password": self.unregistered_password},
         )
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -75,7 +77,7 @@ class LoginTests(APITestCase):
         # enumeration).
         unregistered_response = self.client.post(
             reverse("login"),
-            {"email": "nobody@example.com", "password": "whatever-password"},
+            {"email": self.unregistered_email, "password": self.unregistered_password},
         )
         wrong_password_response = self.client.post(
             reverse("login"),
@@ -91,7 +93,7 @@ class LoginTests(APITestCase):
         # session.
         unregistered_response = self.client.post(
             reverse("login"),
-            {"email": "nobody@example.com", "password": "whatever-password"},
+            {"email": self.unregistered_email, "password": self.unregistered_password},
         )
         wrong_password_response = self.client.post(
             reverse("login"),
