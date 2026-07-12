@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from inventory.tests.factories import ProductTypeFactory
+from inventory.tests.factories import CategoryFactory, ProductTypeFactory
 
 
 class ProductTypeTests(APITestCase):
@@ -13,6 +13,7 @@ class ProductTypeTests(APITestCase):
             username="jane", email="jane@example.com", password=self.password
         )
         self.client.force_authenticate(user=self.user)
+        self.category = CategoryFactory()
 
     def test_create_product_type_with_all_fields(self):
         # TC-01: create with name, model code, and description
@@ -22,6 +23,7 @@ class ProductTypeTests(APITestCase):
                 "name": "Bar LED Model A",
                 "model_code": "BAR-LED-A",
                 "description": "Moving bar light",
+                "category": self.category.id,
             },
         )
 
@@ -29,16 +31,27 @@ class ProductTypeTests(APITestCase):
         self.assertEqual(response.data["name"], "Bar LED Model A")
         self.assertEqual(response.data["model_code"], "BAR-LED-A")
         self.assertEqual(response.data["description"], "Moving bar light")
+        self.assertEqual(response.data["category"], self.category.id)
 
     def test_create_product_type_with_name_only(self):
         # TC-02/AC-3: model code and description are optional
         response = self.client.post(
-            reverse("producttype-list"), {"name": "Bar LED Model A"}
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": self.category.id},
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["model_code"], "")
         self.assertEqual(response.data["description"], "")
+
+    def test_create_product_type_without_category_is_rejected(self):
+        # AC-4: category is a required field on the Product Type form
+        response = self.client.post(
+            reverse("producttype-list"), {"name": "Bar LED Model A"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
 
     def test_create_product_type_succeeds_via_real_csrf_flow(self):
         # force_authenticate (used by every other test here) bypasses CSRF
@@ -54,7 +67,7 @@ class ProductTypeTests(APITestCase):
 
         response = client.post(
             reverse("producttype-list"),
-            {"name": "Bar LED Model A"},
+            {"name": "Bar LED Model A", "category": self.category.id},
             HTTP_X_CSRFTOKEN=csrf_token,
         )
 
@@ -71,7 +84,10 @@ class ProductTypeTests(APITestCase):
         )
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
 
-        response = client.post(reverse("producttype-list"), {"name": "Bar LED Model A"})
+        response = client.post(
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": self.category.id},
+        )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -99,7 +115,9 @@ class ProductTypeTests(APITestCase):
         )
 
     def test_create_product_type_without_name_is_rejected(self):
-        response = self.client.post(reverse("producttype-list"), {})
+        response = self.client.post(
+            reverse("producttype-list"), {"category": self.category.id}
+        )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("name", response.data)
@@ -107,7 +125,8 @@ class ProductTypeTests(APITestCase):
     def test_created_product_type_appears_in_list(self):
         # AC-1: new product type appears in the product type list
         response = self.client.post(
-            reverse("producttype-list"), {"name": "Bar LED Model A"}
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": self.category.id},
         )
         created_id = response.data["id"]
 

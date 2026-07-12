@@ -19,7 +19,7 @@ class LoginSerializer(serializers.Serializer):
 class ProductTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductType
-        fields = ["id", "name", "model_code", "description"]
+        fields = ["id", "name", "model_code", "description", "category"]
 
 
 class CategorySerializer(serializers.ModelSerializer):

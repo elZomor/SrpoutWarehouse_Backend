@@ -14,6 +14,18 @@ class CategoryTests(APITestCase):
         )
         self.client.force_authenticate(user=self.user)
 
+    def _login_with_csrf_enforced_client(self):
+        # force_authenticate (used by every other test here) bypasses CSRF
+        # entirely, so it can't prove a real browser session - which must
+        # send X-CSRFToken - can actually create a category.
+        client = APIClient(enforce_csrf_checks=True)
+        login_response = client.post(
+            reverse("login"),
+            {"email": self.user.email, "password": self.password},
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        return client, client.cookies["csrftoken"].value
+
     def test_create_category_with_all_fields(self):
         # TC-01: create with name and description
         response = self.client.post(
@@ -33,16 +45,7 @@ class CategoryTests(APITestCase):
         self.assertEqual(response.data["description"], "")
 
     def test_create_category_succeeds_via_real_csrf_flow(self):
-        # force_authenticate (used by every other test here) bypasses CSRF
-        # entirely, so it can't prove a real browser session - which must
-        # send X-CSRFToken - can actually create a category.
-        client = APIClient(enforce_csrf_checks=True)
-        login_response = client.post(
-            reverse("login"),
-            {"email": self.user.email, "password": self.password},
-        )
-        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
-        csrf_token = client.cookies["csrftoken"].value
+        client, csrf_token = self._login_with_csrf_enforced_client()
 
         response = client.post(
             reverse("category-list"),
@@ -56,12 +59,7 @@ class CategoryTests(APITestCase):
         # A real session without the X-CSRFToken header must still be
         # rejected - proves CSRF enforcement is actually active on this
         # endpoint, not just that it succeeds when the token is sent.
-        client = APIClient(enforce_csrf_checks=True)
-        login_response = client.post(
-            reverse("login"),
-            {"email": self.user.email, "password": self.password},
-        )
-        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        client, _csrf_token = self._login_with_csrf_enforced_client()
 
         response = client.post(reverse("category-list"), {"name": "Lighting"})
 
@@ -90,6 +88,14 @@ class CategoryTests(APITestCase):
             self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND
         )
 
+    def test_create_category_with_duplicate_name_is_rejected(self):
+        CategoryFactory(name="Lighting")
+
+        response = self.client.post(reverse("category-list"), {"name": "Lighting"})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("name", response.data)
+
     def test_create_category_without_name_is_rejected(self):
         response = self.client.post(reverse("category-list"), {})
 
@@ -98,13 +104,12 @@ class CategoryTests(APITestCase):
 
     def test_created_category_appears_in_list(self):
         # AC-1: new category appears in the category list
-        response = self.client.post(reverse("category-list"), {"name": "Lighting"})
-        created_id = response.data["id"]
+        category = CategoryFactory(name="Lighting")
 
         list_response = self.client.get(reverse("category-list"))
 
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertIn(created_id, [item["id"] for item in list_response.data])
+        self.assertIn(category.id, [item["id"] for item in list_response.data])
 
     def test_search_matches_by_name(self):
         # TC-03: search filters to categories whose name matches
