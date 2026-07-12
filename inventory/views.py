@@ -7,8 +7,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from inventory.models import ProductType
-from inventory.serializers import LoginSerializer, ProductTypeSerializer, UserSerializer
+from inventory.models import Category, ProductType
+from inventory.serializers import (
+    CategorySerializer,
+    LoginSerializer,
+    ProductTypeSerializer,
+    UserSerializer,
+)
 
 
 class LoginView(APIView):
@@ -79,3 +84,17 @@ class ProductTypeViewSet(
     serializer_class = ProductTypeSerializer
     filter_backends = [SearchFilter]
     search_fields = ProductType.SEARCH_FIELDS
+
+
+class CategoryViewSet(
+    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    # WRH-61 (PRD story US-026a) only scopes create/list/search; retrieve,
+    # update, and archive/delete semantics are a separate PRD story
+    # (US-026b / WRH-62), so only list+create are mixed in - no retrieve/
+    # update/destroy routes get registered at all.
+    permission_classes = [IsAuthenticated]
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    filter_backends = [SearchFilter]
+    search_fields = Category.SEARCH_FIELDS
