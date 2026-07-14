@@ -11,5 +11,6 @@ class ProductTypeAdmin(admin.ModelAdmin):
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ("name",)
+    list_display = ("name", "archived")
+    list_filter = ("archived",)
     search_fields = Category.SEARCH_FIELDS

@@ -53,6 +53,46 @@ class ProductTypeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("category", response.data)
 
+    def test_create_product_type_with_archived_category_is_rejected(self):
+        # AC-6/WRH-62: an archived category is hidden from the category
+        # dropdown, but the API itself must also reject it directly - a
+        # stale/replayed id shouldn't be able to attach a new Product Type
+        # to a retired category.
+        archived_category = CategoryFactory(archived=True)
+
+        response = self.client.post(
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": archived_category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+
+    def test_product_type_response_includes_category_name(self):
+        # Denormalized so the frontend can display the category name for a
+        # Product Type without depending on the (now archived-filtered)
+        # category list still containing it.
+        response = self.client.post(
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": self.category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["category_name"], self.category.name)
+
+    def test_product_type_still_shows_category_name_after_category_archived(self):
+        response = self.client.post(
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": self.category.id},
+        )
+        created_id = response.data["id"]
+        self.client.post(f"/api/categories/{self.category.id}/archive/")
+
+        list_response = self.client.get(reverse("producttype-list"))
+
+        item = next(i for i in list_response.data if i["id"] == created_id)
+        self.assertEqual(item["category_name"], self.category.name)
+
     def test_create_product_type_succeeds_via_real_csrf_flow(self):
         # force_authenticate (used by every other test here) bypasses CSRF
         # entirely, so it can't prove a real browser session - which must

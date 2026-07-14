@@ -1,9 +1,13 @@
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
+from django.db.models import ProtectedError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from inventory.tests.factories import CategoryFactory
+from inventory.models import Category
+from inventory.tests.factories import CategoryFactory, ProductTypeFactory
 
 
 class CategoryTests(APITestCase):
@@ -65,42 +69,157 @@ class CategoryTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_detail_route_is_not_registered(self):
-        # CategoryViewSet only mixes in list+create, so no retrieve/update/
-        # destroy route exists at all for /categories/<pk>/ - WRH-61 only
-        # scopes create/list/search; that surface is a separate story (PRD
-        # US-026b / WRH-62) and must not be reachable yet.
+    def test_retrieve_and_update_routes_are_not_registered(self):
+        # CategoryViewSet mixes in list/create/destroy plus the archive
+        # action (WRH-62), so the detail route now exists (DELETE works)
+        # but retrieve/update aren't needed by any story yet - GET/PUT/PATCH
+        # correctly 405 (method not allowed on an existing route) rather
+        # than 404 (route doesn't exist at all).
         category = CategoryFactory()
         detail_url = f"/api/categories/{category.pk}/"
 
         self.assertEqual(
-            self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            self.client.get(detail_url).status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
         self.assertEqual(
             self.client.put(detail_url, {"name": "New Name"}).status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
         self.assertEqual(
             self.client.patch(detail_url, {"name": "New Name"}).status_code,
-            status.HTTP_404_NOT_FOUND,
-        )
-        self.assertEqual(
-            self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
 
     def test_create_category_with_duplicate_name_is_rejected(self):
+        # AC-2/TC-02
         CategoryFactory(name="Lighting")
 
         response = self.client.post(reverse("category-list"), {"name": "Lighting"})
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("name", response.data)
+        self.assertEqual(
+            response.data["name"], ["A category with this name already exists."]
+        )
 
     def test_create_category_without_name_is_rejected(self):
+        # AC-1/TC-01
         response = self.client.post(reverse("category-list"), {})
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("name", response.data)
+        self.assertEqual(response.data["name"], ["Name is required."])
+
+    def test_create_category_with_empty_name_is_rejected(self):
+        # AC-1/TC-01: empty string, not just an omitted field
+        response = self.client.post(reverse("category-list"), {"name": ""})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["name"], ["Name is required."])
+
+    def test_delete_category_with_assigned_product_types_is_blocked(self):
+        # AC-3/TC-03
+        category = CategoryFactory()
+        ProductTypeFactory.create_batch(3, category=category)
+
+        response = self.client.delete(f"/api/categories/{category.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Cannot delete — 3 product types are assigned to this category. "
+            "Archive it instead.",
+        )
+        self.assertEqual(response.data["assigned_product_type_count"], 3)
+        self.assertTrue(Category.objects.filter(pk=category.pk).exists())
+
+    def test_delete_blocked_message_is_singular_for_one_product_type(self):
+        # AC-3: "1 product types are" reads wrong - singular noun/verb only
+        # when exactly one Product Type is assigned.
+        category = CategoryFactory()
+        ProductTypeFactory(category=category)
+
+        response = self.client.delete(f"/api/categories/{category.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Cannot delete — 1 product type is assigned to this category. "
+            "Archive it instead.",
+        )
+
+    def test_delete_category_with_zero_product_types_succeeds(self):
+        # AC-5/TC-05
+        category = CategoryFactory()
+
+        response = self.client.delete(f"/api/categories/{category.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Category.objects.filter(pk=category.pk).exists())
+
+    def test_delete_with_unrelated_search_query_param_still_succeeds(self):
+        # A stray ?search= param (e.g. left over from the list view's search
+        # box) must not affect get_object()'s pk lookup on the detail route -
+        # SearchFilter is only meant to scope the list action.
+        category = CategoryFactory(name="Lighting")
+
+        response = self.client.delete(
+            f"/api/categories/{category.pk}/", {"search": "does-not-match"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Category.objects.filter(pk=category.pk).exists())
+
+    def test_archive_with_unrelated_search_query_param_still_succeeds(self):
+        category = CategoryFactory(name="Lighting")
+
+        response = self.client.post(
+            f"/api/categories/{category.pk}/archive/", {"search": "does-not-match"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_delete_race_with_concurrent_assignment_is_blocked_not_500(self):
+        # AC-3: if a Product Type gets assigned between the count() check and
+        # the actual delete (concurrent request), on_delete=PROTECT raises
+        # ProtectedError inside perform_destroy() - this must still surface
+        # as the same structured 400, not an unhandled 500.
+        category = CategoryFactory()
+
+        with patch(
+            "inventory.views.CategoryViewSet.perform_destroy",
+            side_effect=ProtectedError("protected", set()),
+        ):
+            response = self.client.delete(f"/api/categories/{category.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("assigned_product_type_count", response.data)
+        self.assertTrue(Category.objects.filter(pk=category.pk).exists())
+
+    def test_archive_category_keeps_product_types_intact(self):
+        # AC-4/TC-04
+        category = CategoryFactory()
+        product_type = ProductTypeFactory(category=category)
+
+        response = self.client.post(f"/api/categories/{category.pk}/archive/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["archived"])
+        category.refresh_from_db()
+        self.assertTrue(category.archived)
+        product_type.refresh_from_db()
+        self.assertEqual(product_type.category_id, category.id)
+
+    def test_archived_category_hidden_from_default_list(self):
+        # AC-4/AC-6/TC-06: same list endpoint backs the active-list view
+        # and the Product Type form's category selector.
+        archived = CategoryFactory(archived=True)
+        active = CategoryFactory()
+
+        response = self.client.get(reverse("category-list"))
+
+        ids = [item["id"] for item in response.data]
+        self.assertIn(active.id, ids)
+        self.assertNotIn(archived.id, ids)
 
     def test_created_category_appears_in_list(self):
         # AC-1: new category appears in the category list
