@@ -34,18 +34,24 @@ Make the agreed-upon code changes. Re-run the affected parts of the CI gauntlet 
 
 ---
 
-## Step 5 — Commit and push
+## Step 5 — Capture lessons
 
-Draft a commit message describing what feedback was addressed (e.g. `SW-123: address review feedback — <short summary>`). **Ask for explicit confirmation** before `git commit`, then **ask for explicit confirmation** before `git push`.
+For each piece of feedback fixed in Step 4, judge whether it's a **recurring, generalizable** mistake (would plausibly bite again on a different ticket) rather than a one-off typo. If so, append an entry to `LESSONS.md` at the repo root using its documented format (date, this Jira key, what/fix/rule). Skip entries that would just duplicate an existing one. Show the user what you appended, if anything.
 
 ---
 
-## Step 6 — Reply
+## Step 6 — Commit and push
+
+Draft a commit message describing what feedback was addressed (e.g. `SW-123: address review feedback — <short summary>`). Stage `LESSONS.md` alongside the code fix if it was updated. **Ask for explicit confirmation** before `git commit`, then **ask for explicit confirmation** before `git push`.
+
+---
+
+## Step 7 — Reply
 
 For any feedback that was fixed, note that in chat so the user can reply on GitHub (or, if the user confirms, reply directly via `gh api` / `gh pr comment`). For feedback that wasn't a code change, surface your Step 3 reasoning so the user can respond to the reviewer themselves.
 
 ---
 
-## Step 7 — Report
+## Step 8 — Report
 
 Summarize what changed and confirm the PR is updated. Remind the user this may need another `/code-review` pass if the changes were substantial.

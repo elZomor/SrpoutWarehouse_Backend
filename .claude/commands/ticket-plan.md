@@ -25,13 +25,19 @@ Load the `django-conventions` skill before designing anything. It documents this
 
 ---
 
-## Step 3 — Read current app state
+## Step 3 — Check lessons learned
+
+Read `LESSONS.md` at the repo root. It captures recurring, non-obvious mistakes caught in past PR reviews. If any entry is relevant to this ticket's scope, factor its rule into the plan and call it out explicitly (e.g. "per LESSONS.md <date> entry, doing X instead of Y"). If the file has no entries yet, note that and move on.
+
+---
+
+## Step 4 — Read current app state
 
 Read `inventory/models.py`, `sprout_warehouse/settings.py`, and `sprout_warehouse/urls.py` (and `inventory/urls.py`/`inventory/serializers.py` if they exist) to see what's already there. Don't assume `django-conventions`' description of existing resources is still accurate — check.
 
 ---
 
-## Step 4 — Produce the plan
+## Step 5 — Produce the plan
 
 Write a concrete plan, mapped 1:1 to the ticket's Acceptance Criteria, covering:
 - Any one-time wiring still needed (`INSTALLED_APPS`, `inventory/urls.py`, router include).
@@ -46,6 +52,6 @@ Flag anything ambiguous in the ticket rather than guessing.
 
 ---
 
-## Step 5 — Present and stop
+## Step 6 — Present and stop
 
 Show the plan in chat. Do not proceed to implementation. Tell the user to run `/ticket-implement <JIRA-KEY>` once they've reviewed and approved it.

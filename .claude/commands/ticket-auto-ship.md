@@ -10,7 +10,7 @@ The only reasons to stop before the end are genuine failures you can't safely re
 
 ## Step 1 — Plan
 
-Fetch the issue via Rovo MCP `getJiraIssue`. Load the `django-conventions` skill. Read current `inventory/models.py`, `sprout_warehouse/settings.py`, `sprout_warehouse/urls.py` for present state. Produce a concrete plan (models, serializers, viewset, routes, admin, migration, tests) mapped to the ticket's AC. Do not present it for approval — proceed straight to Step 2, but keep the plan to include in your final report.
+Fetch the issue via Rovo MCP `getJiraIssue`. Load the `django-conventions` skill. Read `LESSONS.md` at the repo root and factor any relevant entries into the plan. Read current `inventory/models.py`, `sprout_warehouse/settings.py`, `sprout_warehouse/urls.py` for present state. Produce a concrete plan (models, serializers, viewset, routes, admin, migration, tests) mapped to the ticket's AC. Do not present it for approval — proceed straight to Step 2, but keep the plan to include in your final report.
 
 ---
 
