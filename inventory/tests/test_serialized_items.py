@@ -6,6 +6,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from inventory.models import SerializedItem
+from inventory.serializers.serialized_item import SerializedItemSerializer
 from inventory.tests.factories import ProductTypeFactory, SerializedItemFactory
 
 
@@ -98,6 +99,18 @@ class SerializedItemTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["product_type"], ["Product type is required."])
+
+    def test_validate_serial_number_excludes_current_instance(self):
+        # No update route exists yet (Create+List only), but
+        # validate_serial_number() must not reject an existing instance
+        # against its own unchanged serial number once one is added -
+        # exercise the serializer directly with instance= set.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        serializer = SerializedItemSerializer(instance=item)
+
+        self.assertEqual(serializer.validate_serial_number("SN-042"), "SN-042")
 
     def test_duplicate_serial_number_race_still_returns_400(self):
         # AC-1/AC-5: simulates two requests racing past the serializer's

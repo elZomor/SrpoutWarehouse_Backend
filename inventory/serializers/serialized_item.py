@@ -3,6 +3,12 @@ from rest_framework import serializers
 from inventory.models import ProductType, SerializedItem
 
 
+def duplicate_serial_number_message(serial_number):
+    # Shared with views.serialized_item.perform_create()'s IntegrityError
+    # fallback so the pre-check and DB-race paths can't drift apart.
+    return f"Serial number {serial_number} is already registered."
+
+
 class SerializedItemSerializer(serializers.ModelSerializer):
     # AC-6/WRH-21: an archived product type isn't a valid parent for a new
     # SerializedItem - restrict the write-side queryset so archived product
@@ -51,8 +57,12 @@ class SerializedItemSerializer(serializers.ModelSerializer):
         }
 
     def validate_serial_number(self, value):
-        if SerializedItem.objects.filter(serial_number=value).exists():
-            raise serializers.ValidationError(
-                f"Serial number {value} is already registered."
-            )
+        # Exclude self.instance so a future update path (none exists yet -
+        # this viewset is Create+List only) doesn't reject an item against
+        # its own unchanged serial number.
+        queryset = SerializedItem.objects.filter(serial_number=value)
+        if self.instance is not None:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError(duplicate_serial_number_message(value))
         return value
