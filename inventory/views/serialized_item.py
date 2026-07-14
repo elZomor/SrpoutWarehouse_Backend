@@ -14,11 +14,16 @@ from inventory.serializers.serialized_item import duplicate_serial_number_messag
 
 
 class SerializedItemViewSet(
-    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
 ):
-    # WRH-22 (PRD story US-003a) only scopes register/list/filter/search;
-    # retrieve/update/destroy are separate stories, so only list+create are
-    # mixed in - no retrieve/update/destroy routes get registered at all.
+    # WRH-22 (PRD story US-003a) scoped register/list/filter/search; WRH-66
+    # (US-003e) adds destroy - a hard delete, since no downstream resource
+    # references a SerializedItem by FK yet (WorkOrder doesn't exist), so
+    # unlike Category->ProductType there's no ProtectedError to catch here.
+    # retrieve/update are still separate, unscoped stories.
     permission_classes = [IsAuthenticated]
     # select_related avoids an N+1 query per row: the serializer's
     # product_type_name field reads product_type.name on every instance.
