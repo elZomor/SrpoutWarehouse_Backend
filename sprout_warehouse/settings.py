@@ -61,7 +61,8 @@ SESSION_COOKIE_AGE = 60 * 60 * 24
 # Application definition
 
 INSTALLED_APPS = [
-    "unfold",
+    "admin_interface",
+    "colorfield",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -179,11 +180,5 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
-
-# django-unfold (admin UI theme)
-# https://unfoldadmin.com/docs/
-
-UNFOLD = {
-    "SITE_TITLE": "Sprout Warehouse Admin",
-    "SITE_HEADER": "Sprout Warehouse",
-}
+X_FRAME_OPTIONS = "SAMEORIGIN"
+SILENCED_SYSTEM_CHECKS = ["security.W019"]

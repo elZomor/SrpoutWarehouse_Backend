@@ -10,7 +10,7 @@ Past the initial scaffold: `rest_framework` and `inventory` are registered in `I
 
 - Python 3.14, virtualenv at `.venv`; dependencies pinned in `requirements.txt` / `requirements-dev.txt`.
 - Django 6.0.6, djangorestframework 3.17.1, gunicorn, psycopg2-binary, python-dotenv.
-- `django-unfold` (admin theme), `django-cors-headers`, `django-filter`, `django-extensions`, `factory_boy` (test fixtures), `qrcode`, `weasyprint`, `Pillow` — all already installed and wired where noted below.
+- `django-cors-headers`, `django-filter`, `django-extensions`, `factory_boy` (test fixtures), `qrcode`, `weasyprint`, `Pillow` — all already installed and wired where noted below.
 - Activate with `source .venv/bin/activate` before running any `manage.py` commands, or invoke via `.venv/bin/python manage.py ...`.
 - Database is PostgreSQL (no more sqlite). All secrets/config (`SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `POSTGRES_*`, `DB_SUPERUSER_*`) live in `.env`, loaded via `python-dotenv` in `sprout_warehouse/settings.py`. `.env` is gitignored — copy `.env.example` to `.env` and fill in real values for any new environment. Running `manage.py` locally (outside Docker) still requires a reachable Postgres instance (e.g. `POSTGRES_HOST=localhost` if you run `docker compose up db` alone).
 
@@ -95,7 +95,7 @@ Standard single-project Django layout:
   - `serializers.py` — one `ModelSerializer` per model, plus `UserSerializer` (read-only, used for auth responses) and `LoginSerializer` (plain `Serializer` for the login payload).
   - `views.py` — `LoginView`/`LogoutView`/`MeView` (plain `APIView`s, session-based); `ProductTypeViewSet` (`ListModelMixin` + `CreateModelMixin` only — no retrieve/update/destroy per its PRD story yet); `CategoryViewSet` (adds `DestroyModelMixin` plus a custom `archive` action — delete is blocked while Product Types are assigned, archive is the alternative). Per-resource mixin scope tracks each PRD story; don't treat a missing route as a bug unless the ticket says otherwise — check the viewset's actual mixins/actions rather than assuming.
   - `urls.py` — `auth/login/`, `auth/logout/`, `auth/me/` as explicit paths, plus a `DefaultRouter` registering `product-types` and `category` viewsets; all included under `/api/`.
-  - `admin.py` — one `ModelAdmin` per model registered with `unfold` as the admin theme (registration API is the standard `admin.site.register`/`@admin.register`, unfold reskins automatically).
+  - `admin.py` — one `ModelAdmin` per model (registration API is the standard `admin.site.register`/`@admin.register`).
   - `tests/` — package (not a single `tests.py`) with one module per resource (`test_auth.py`, `test_categories.py`, `test_product_types.py`) plus `factories.py` (`factory_boy` `DjangoModelFactory` per model).
 - `db/init/` — shell scripts mounted into the Postgres container's `/docker-entrypoint-initdb.d/`, run once on first DB initialization.
 - `Dockerfile` / `docker-compose.yml` — containerize `web` (Django + gunicorn) and `db` (Postgres); see the Docker section below.
