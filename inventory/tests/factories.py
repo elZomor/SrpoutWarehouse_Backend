@@ -1,6 +1,6 @@
 import factory
 
-from inventory.models import Category, ProductType
+from inventory.models import Category, ProductType, SerializedItem
 
 
 class CategoryFactory(factory.django.DjangoModelFactory):
@@ -19,3 +19,12 @@ class ProductTypeFactory(factory.django.DjangoModelFactory):
     model_code = ""
     description = ""
     category = factory.SubFactory(CategoryFactory)
+
+
+class SerializedItemFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = SerializedItem
+
+    serial_number = factory.Sequence(lambda n: f"SN-{n:04d}")
+    product_type = factory.SubFactory(ProductTypeFactory)
+    notes = ""

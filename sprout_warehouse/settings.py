@@ -180,5 +180,9 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
+# QR code images generated for SerializedItem.qr_code (WRH-22).
+MEDIA_URL = "media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
 X_FRAME_OPTIONS = "SAMEORIGIN"
 SILENCED_SYSTEM_CHECKS = ["security.W019"]
