@@ -1,7 +1,6 @@
 import io
 import uuid
 
-from django.core.files.base import ContentFile
 from django.db import models
 
 import qrcode
@@ -23,7 +22,6 @@ class SerializedItem(models.Model):
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_AVAILABLE
     )
-    qr_code = models.ImageField(upload_to="qr_codes/", blank=True)
     notes = models.TextField(blank=True, default="")
     # No WorkOrder model exists yet (issuance is a later Delivery Plan phase);
     # kept as an always-blank placeholder so the list API contract (AC-3)
@@ -37,19 +35,12 @@ class SerializedItem(models.Model):
     def __str__(self):
         return self.serial_number
 
-    def generate_qr_code(self):
+    def generate_qr_code_png(self):
+        # Regenerated on demand (reprint) rather than stored: the payload is
+        # just this item's own stable UUID, so re-running the deterministic
+        # encode is cheaper than keeping a rendered image blob that's only
+        # ever read again if a printed label is damaged.
         image = qrcode.make(str(self.serial))
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        filename = f"{self.serial}.png"
-        self.qr_code.save(filename, ContentFile(buffer.getvalue()), save=False)
-
-    def save(self, *args, **kwargs):
-        # Persist the row first: generate_qr_code() writes to storage
-        # immediately, so generating it before this insert/update succeeds
-        # would leave an orphaned file on disk if the DB write fails (e.g. a
-        # racing duplicate serial_number hitting the unique constraint).
-        super().save(*args, **kwargs)
-        if not self.qr_code:
-            self.generate_qr_code()
-            super().save(update_fields=["qr_code"])
+        return buffer.getvalue()
