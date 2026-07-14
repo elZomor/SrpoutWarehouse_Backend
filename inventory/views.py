@@ -82,7 +82,9 @@ class ProductTypeViewSet(
     # (US-002b), so only list+create are mixed in - no retrieve/update/
     # destroy routes get registered at all.
     permission_classes = [IsAuthenticated]
-    queryset = ProductType.objects.all()
+    # select_related avoids an N+1 query per row: CategorySerializer's
+    # category_name field reads category.name on every serialized instance.
+    queryset = ProductType.objects.select_related("category").all()
     serializer_class = ProductTypeSerializer
     filter_backends = [SearchFilter]
     search_fields = ProductType.SEARCH_FIELDS
