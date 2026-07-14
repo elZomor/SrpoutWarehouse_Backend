@@ -10,6 +10,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from inventory.models import SerializedItem
 from inventory.serializers import SerializedItemSerializer
+from inventory.serializers.serialized_item import duplicate_serial_number_message
 
 
 class SerializedItemViewSet(
@@ -36,12 +37,9 @@ class SerializedItemViewSet(
         try:
             serializer.save()
         except IntegrityError as exc:
+            serial_number = serializer.validated_data["serial_number"]
             raise ValidationError(
-                {
-                    "serial_number": (
-                        "serialized item with this serial number already exists."
-                    )
-                }
+                {"serial_number": [duplicate_serial_number_message(serial_number)]}
             ) from exc
 
     @action(detail=True, methods=["get"], url_path="qr-code")

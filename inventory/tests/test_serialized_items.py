@@ -6,6 +6,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from inventory.models import SerializedItem
+from inventory.serializers.serialized_item import SerializedItemSerializer
 from inventory.tests.factories import ProductTypeFactory, SerializedItemFactory
 
 
@@ -49,7 +50,8 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_duplicate_serial_number_is_rejected(self):
-        # AC-2: the same serial number cannot be registered twice
+        # TC-01/AC-1: the same serial number cannot be registered twice,
+        # under the same product type, with the exact AC-1 error text
         SerializedItemFactory(serial_number="SN-042", product_type=self.product_type)
 
         response = self.client.post(
@@ -58,24 +60,82 @@ class SerializedItemTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("serial_number", response.data)
+        self.assertEqual(
+            response.data["serial_number"],
+            ["Serial number SN-042 is already registered."],
+        )
+
+    def test_duplicate_serial_number_is_rejected_across_product_types(self):
+        # TC-02/AC-2: uniqueness is global, not scoped to a product type
+        SerializedItemFactory(serial_number="SN-042", product_type=self.product_type)
+        other_type = ProductTypeFactory()
+
+        response = self.client.post(
+            reverse("serializeditem-list"),
+            {"serial_number": "SN-042", "product_type": other_type.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            ["Serial number SN-042 is already registered."],
+        )
+
+    def test_blank_serial_number_is_rejected(self):
+        # TC-03/AC-3
+        response = self.client.post(
+            reverse("serializeditem-list"),
+            {"serial_number": "", "product_type": self.product_type.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["serial_number"], ["Serial number is required."])
+
+    def test_missing_product_type_is_rejected(self):
+        # TC-04/AC-4
+        response = self.client.post(
+            reverse("serializeditem-list"), {"serial_number": "SN-042"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["product_type"], ["Product type is required."])
+
+    def test_validate_serial_number_excludes_current_instance(self):
+        # No update route exists yet (Create+List only), but
+        # validate_serial_number() must not reject an existing instance
+        # against its own unchanged serial number once one is added -
+        # exercise the serializer directly with instance= set.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        serializer = SerializedItemSerializer(instance=item)
+
+        self.assertEqual(serializer.validate_serial_number("SN-042"), "SN-042")
 
     def test_duplicate_serial_number_race_still_returns_400(self):
-        # AC-2: simulates two requests racing past the serializer's
-        # SELECT-based UniqueValidator (disabled here to stand in for that
-        # race) so the DB's unique constraint is the only thing left to
-        # catch the duplicate - proves perform_create() translates the
-        # resulting IntegrityError into a 400, not an unhandled 500.
+        # AC-1/AC-5: simulates two requests racing past the serializer's
+        # SELECT-based check (disabled here to stand in for that race) so
+        # the DB's unique constraint is the only thing left to catch the
+        # duplicate - proves perform_create() translates the resulting
+        # IntegrityError into a 400 with the same AC-1 wording, not an
+        # unhandled 500.
         SerializedItemFactory(serial_number="SN-042", product_type=self.product_type)
 
-        with mock.patch("rest_framework.validators.UniqueValidator.__call__"):
+        with mock.patch(
+            "inventory.serializers.serialized_item.SerializedItemSerializer"
+            ".validate_serial_number",
+            side_effect=lambda value: value,
+        ):
             response = self.client.post(
                 reverse("serializeditem-list"),
                 {"serial_number": "SN-042", "product_type": self.product_type.id},
             )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("serial_number", response.data)
+        self.assertEqual(
+            response.data["serial_number"],
+            ["Serial number SN-042 is already registered."],
+        )
 
     def test_list_filtered_by_product_type(self):
         # TC-03/AC-3: filtering the list by product type only returns items
