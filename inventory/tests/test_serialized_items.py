@@ -125,6 +125,21 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(item["product_type_name"], self.product_type.name)
         self.assertEqual(item["last_work_order_reference"], "")
 
+    def test_register_serialized_item_with_archived_product_type_is_rejected(self):
+        # TC-06/WRH-21: an archived product type is hidden from the
+        # selector, but the API itself must also reject it directly - a
+        # stale/replayed id shouldn't be able to register a new item
+        # against a retired product type.
+        archived_type = ProductTypeFactory(archived=True)
+
+        response = self.client.post(
+            reverse("serializeditem-list"),
+            {"serial_number": "SN-042", "product_type": archived_type.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("product_type", response.data)
+
     def test_detail_route_is_not_registered(self):
         # WRH-22 only scopes register/list/filter/search - no retrieve/
         # update/destroy route exists yet for /serialized-items/<pk>/

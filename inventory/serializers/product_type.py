@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 
 from inventory.models import Category, ProductType
 
@@ -26,4 +27,20 @@ class ProductTypeSerializer(serializers.ModelSerializer):
             "description",
             "category",
             "category_name",
+            "archived",
         ]
+        read_only_fields = ["archived"]
+        extra_kwargs = {
+            "name": {
+                "error_messages": {
+                    "blank": "Name is required.",
+                    "required": "Name is required.",
+                },
+                "validators": [
+                    UniqueValidator(
+                        queryset=ProductType.objects.all(),
+                        message="A product type with this name already exists.",
+                    )
+                ],
+            },
+        }

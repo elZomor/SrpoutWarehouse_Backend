@@ -1,13 +1,21 @@
 from rest_framework import serializers
 
-from inventory.models import SerializedItem
+from inventory.models import ProductType, SerializedItem
 
 
 class SerializedItemSerializer(serializers.ModelSerializer):
-    # No queryset restriction needed here (unlike ProductTypeSerializer's
-    # category field) - ProductType has no archived/soft-delete state to
-    # exclude, so ModelSerializer's auto-generated PrimaryKeyRelatedField
-    # for this FK is already correct; no explicit declaration needed.
+    # AC-6/WRH-21: an archived product type isn't a valid parent for a new
+    # SerializedItem - restrict the write-side queryset so archived product
+    # types aren't selectable for new registrations (TC-06), mirroring
+    # ProductTypeSerializer's category field. to_representation() doesn't
+    # consult this queryset, so an existing SerializedItem whose product
+    # type gets archived later still reads back fine.
+    product_type = serializers.PrimaryKeyRelatedField(
+        queryset=ProductType.objects.filter(archived=False),
+        error_messages={
+            "does_not_exist": "Select a product type that exists and is not archived."
+        },
+    )
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True
     )
