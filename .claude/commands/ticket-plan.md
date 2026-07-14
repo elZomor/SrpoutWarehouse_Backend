@@ -27,7 +27,7 @@ Load the `django-conventions` skill before designing anything. It documents this
 
 ## Step 3 — Read current app state
 
-Read `inventory/models.py`, `sprout_warehouse/settings.py`, and `sprout_warehouse/urls.py` (and `inventory/urls.py`/`inventory/serializers.py` if they exist) to see what's already there. Don't assume the one-time wiring gaps noted in `django-conventions` are still open — check.
+Read `inventory/models.py`, `sprout_warehouse/settings.py`, and `sprout_warehouse/urls.py` (and `inventory/urls.py`/`inventory/serializers.py` if they exist) to see what's already there. Don't assume `django-conventions`' description of existing resources is still accurate — check.
 
 ---
 

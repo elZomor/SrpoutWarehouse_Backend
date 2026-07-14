@@ -4,17 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-This is a brand-new Django project scaffold (generated via `django-admin startproject sprout_warehouse` + `startapp inventory`). No models, views, URLs, serializers, or tests have been implemented yet — the app files (`inventory/models.py`, `inventory/views.py`, `inventory/admin.py`, `inventory/tests.py`) only contain the default Django boilerplate comments.
-
-Notable gaps to be aware of:
-- `inventory` is not yet registered in `INSTALLED_APPS` (`sprout_warehouse/settings.py`).
-- `djangorestframework` is installed (`requirements.txt`) but not added to `INSTALLED_APPS`, and no DRF routers/serializers exist yet.
-- No `.git` repository has been initialized yet.
+Past the initial scaffold: `rest_framework` and `inventory` are registered in `INSTALLED_APPS`, session-based auth (`login`/`logout`/`me`) is live, and the `inventory` app has two real resources — `Category` and `ProductType` — each with a model, serializer, list+create-only `ModelViewSet`, admin registration, migrations, and tests. Treat this as the pattern to replicate for new domain resources, not an empty scaffold.
 
 ## Environment
 
-- Python 3.14, virtualenv at `.venv`; dependencies pinned in `requirements.txt`.
+- Python 3.14, virtualenv at `.venv`; dependencies pinned in `requirements.txt` / `requirements-dev.txt`.
 - Django 6.0.6, djangorestframework 3.17.1, gunicorn, psycopg2-binary, python-dotenv.
+- `django-unfold` (admin theme), `django-cors-headers`, `django-filter`, `django-extensions`, `factory_boy` (test fixtures), `qrcode`, `weasyprint`, `Pillow` — all already installed and wired where noted below.
 - Activate with `source .venv/bin/activate` before running any `manage.py` commands, or invoke via `.venv/bin/python manage.py ...`.
 - Database is PostgreSQL (no more sqlite). All secrets/config (`SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `POSTGRES_*`, `DB_SUPERUSER_*`) live in `.env`, loaded via `python-dotenv` in `sprout_warehouse/settings.py`. `.env` is gitignored — copy `.env.example` to `.env` and fill in real values for any new environment. Running `manage.py` locally (outside Docker) still requires a reachable Postgres instance (e.g. `POSTGRES_HOST=localhost` if you run `docker compose up db` alone).
 
@@ -63,9 +59,17 @@ python manage.py test
 # Run tests for a single app
 python manage.py test inventory
 
-# Run a single test case / method
-python manage.py test inventory.tests.<TestClassName>
-python manage.py test inventory.tests.<TestClassName>.<test_method_name>
+# Run a single test module / case / method (tests live in the inventory/tests/ package)
+python manage.py test inventory.tests.test_categories
+python manage.py test inventory.tests.test_categories.<TestClassName>
+python manage.py test inventory.tests.test_categories.<TestClassName>.<test_method_name>
+
+# Check for model changes missing a migration (what CI runs)
+python manage.py makemigrations --check --dry-run
+
+# Coverage (what CI runs; fail_under = 50 in pyproject.toml)
+coverage run manage.py test
+coverage report
 
 # Django shell
 python manage.py shell
@@ -74,15 +78,28 @@ python manage.py shell
 python manage.py createsuperuser
 ```
 
+## CI (`.github/workflows/ci.yml`)
+
+Three jobs run on every PR — match these locally before considering a change done:
+- **Lint**: `black --check --diff .` and `flake8 .`.
+- **Review Bot**: `bandit -c pyproject.toml -r .` (excludes `.venv`, `migrations`, `tests` per `pyproject.toml`).
+- **Unit tests**: `makemigrations --check --dry-run` (fails if a model change is missing its migration), then `coverage run manage.py test` + `coverage report` against sqlite (`USE_SQLITE=True`) rather than Postgres.
+
 ## Architecture
 
 Standard single-project Django layout:
 
-- `sprout_warehouse/` — project package: `settings.py` (config, reads from `.env`), `urls.py` (root URLconf, currently only mounts `/admin/`), `wsgi.py`/`asgi.py` (deployment entry points, `wsgi.py` is what gunicorn serves).
-- `inventory/` — the first (currently empty) Django app, intended to hold the domain models/views for warehouse inventory. Follow standard Django app conventions here: models in `models.py`, request handling in `views.py`, admin registration in `admin.py`, migrations auto-generated into `inventory/migrations/`.
+- `sprout_warehouse/` — project package: `settings.py` (config, reads from `.env`), `urls.py` (root URLconf: `admin/` + `api/` → `include("inventory.urls")`), `wsgi.py`/`asgi.py` (deployment entry points, `wsgi.py` is what gunicorn serves).
+- `inventory/` — the single domain app so far, holding both auth views and warehouse resources:
+  - `models.py` — see the file for current fields; both resources define a `SEARCH_FIELDS` tuple consumed by their viewset's `SearchFilter`.
+  - `serializers.py` — one `ModelSerializer` per model, plus `UserSerializer` (read-only, used for auth responses) and `LoginSerializer` (plain `Serializer` for the login payload).
+  - `views.py` — `LoginView`/`LogoutView`/`MeView` (plain `APIView`s, session-based); `ProductTypeViewSet` (`ListModelMixin` + `CreateModelMixin` only — no retrieve/update/destroy per its PRD story yet); `CategoryViewSet` (adds `DestroyModelMixin` plus a custom `archive` action — delete is blocked while Product Types are assigned, archive is the alternative). Per-resource mixin scope tracks each PRD story; don't treat a missing route as a bug unless the ticket says otherwise — check the viewset's actual mixins/actions rather than assuming.
+  - `urls.py` — `auth/login/`, `auth/logout/`, `auth/me/` as explicit paths, plus a `DefaultRouter` registering `product-types` and `category` viewsets; all included under `/api/`.
+  - `admin.py` — one `ModelAdmin` per model registered with `unfold` as the admin theme (registration API is the standard `admin.site.register`/`@admin.register`, unfold reskins automatically).
+  - `tests/` — package (not a single `tests.py`) with one module per resource (`test_auth.py`, `test_categories.py`, `test_product_types.py`) plus `factories.py` (`factory_boy` `DjangoModelFactory` per model).
 - `db/init/` — shell scripts mounted into the Postgres container's `/docker-entrypoint-initdb.d/`, run once on first DB initialization.
 - `Dockerfile` / `docker-compose.yml` — containerize `web` (Django + gunicorn) and `db` (Postgres); see the Docker section below.
 
-When adding a new app, remember to register it in `INSTALLED_APPS` in `sprout_warehouse/settings.py` and wire its URLs into `sprout_warehouse/urls.py` (e.g. via `include()`).
+Auth: `SessionAuthentication` + `IsAuthenticated` are the DRF defaults (`REST_FRAMEWORK` in `settings.py`); `LoginView` explicitly disables authentication classes since there's no session/CSRF cookie yet on first contact (see the comment in `views.py`), and issues the CSRF cookie via `get_token(request)` right after `login()` so the SPA can send `X-CSRFToken` on subsequent requests. Session cookie is `HttpOnly`, backed by the DB session engine, and expires after 1 day (`SESSION_COOKIE_AGE`).
 
-Since REST framework is already installed but unconfigured, if/when API endpoints are added: add `'rest_framework'` to `INSTALLED_APPS`, build serializers/viewsets in the relevant app, and register routes via a DRF router included from `sprout_warehouse/urls.py`.
+When adding a new domain resource, follow the `Category`/`ProductType` pattern above rather than introducing a new one (see the `django-conventions` skill for the exact per-feature checklist).
