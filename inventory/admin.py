@@ -5,7 +5,8 @@ from inventory.models import Category, ProductType, SerializedItem
 
 @admin.register(ProductType)
 class ProductTypeAdmin(admin.ModelAdmin):
-    list_display = ("name", "model_code", "category")
+    list_display = ("name", "model_code", "category", "archived")
+    list_filter = ("archived",)
     search_fields = ProductType.SEARCH_FIELDS
 
 

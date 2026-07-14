@@ -1,9 +1,17 @@
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
+from django.db.models import ProtectedError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from inventory.tests.factories import CategoryFactory, ProductTypeFactory
+from inventory.models import ProductType
+from inventory.tests.factories import (
+    CategoryFactory,
+    ProductTypeFactory,
+    SerializedItemFactory,
+)
 
 
 class ProductTypeTests(APITestCase):
@@ -131,36 +139,166 @@ class ProductTypeTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_detail_route_is_not_registered(self):
-        # ProductTypeViewSet only mixes in list+create, so no retrieve/
-        # update/destroy route exists at all for /product-types/<pk>/ -
-        # WRH-20 only scopes create/list/search; that surface is a
-        # separate story (PRD US-002b) and must not be reachable yet.
+    def test_retrieve_and_update_routes_are_not_registered(self):
+        # ProductTypeViewSet mixes in list/create/destroy plus the archive
+        # action (WRH-21), so the detail route now exists (DELETE works)
+        # but retrieve/update aren't needed by any story yet - GET/PUT/PATCH
+        # correctly 405 (method not allowed on an existing route) rather
+        # than 404 (route doesn't exist at all).
         product_type = ProductTypeFactory()
         detail_url = f"/api/product-types/{product_type.pk}/"
 
         self.assertEqual(
-            self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            self.client.get(detail_url).status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
         self.assertEqual(
             self.client.put(detail_url, {"name": "New Name"}).status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
         self.assertEqual(
             self.client.patch(detail_url, {"name": "New Name"}).status_code,
-            status.HTTP_404_NOT_FOUND,
-        )
-        self.assertEqual(
-            self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
 
     def test_create_product_type_without_name_is_rejected(self):
+        # AC-1/TC-01
         response = self.client.post(
             reverse("producttype-list"), {"category": self.category.id}
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("name", response.data)
+        self.assertEqual(response.data["name"], ["Name is required."])
+
+    def test_create_product_type_with_empty_name_is_rejected(self):
+        # AC-1/TC-01: empty string, not just an omitted field
+        response = self.client.post(
+            reverse("producttype-list"),
+            {"name": "", "category": self.category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["name"], ["Name is required."])
+
+    def test_create_product_type_with_duplicate_name_is_rejected(self):
+        # AC-2/TC-02
+        ProductTypeFactory(name="Bar LED Model A")
+
+        response = self.client.post(
+            reverse("producttype-list"),
+            {"name": "Bar LED Model A", "category": self.category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["name"], ["A product type with this name already exists."]
+        )
+
+    def test_delete_product_type_with_registered_items_is_blocked(self):
+        # AC-3/TC-03
+        product_type = ProductTypeFactory()
+        SerializedItemFactory.create_batch(5, product_type=product_type)
+
+        response = self.client.delete(f"/api/product-types/{product_type.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Cannot delete — 5 items are registered under this product type. "
+            "Archive it instead.",
+        )
+        self.assertEqual(response.data["registered_item_count"], 5)
+        self.assertTrue(ProductType.objects.filter(pk=product_type.pk).exists())
+
+    def test_delete_blocked_message_is_singular_for_one_item(self):
+        # AC-3: "1 items are" reads wrong - singular noun/verb only when
+        # exactly one SerializedItem is registered.
+        product_type = ProductTypeFactory()
+        SerializedItemFactory(product_type=product_type)
+
+        response = self.client.delete(f"/api/product-types/{product_type.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Cannot delete — 1 item is registered under this product type. "
+            "Archive it instead.",
+        )
+
+    def test_delete_product_type_with_zero_items_succeeds(self):
+        # AC-5/TC-05
+        product_type = ProductTypeFactory()
+
+        response = self.client.delete(f"/api/product-types/{product_type.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ProductType.objects.filter(pk=product_type.pk).exists())
+
+    def test_delete_with_unrelated_search_query_param_still_succeeds(self):
+        # A stray ?search= param (e.g. left over from the list view's search
+        # box) must not affect get_object()'s pk lookup on the detail route -
+        # SearchFilter is only meant to scope the list action.
+        product_type = ProductTypeFactory(name="Bar LED Model A")
+
+        response = self.client.delete(
+            f"/api/product-types/{product_type.pk}/", {"search": "does-not-match"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ProductType.objects.filter(pk=product_type.pk).exists())
+
+    def test_archive_with_unrelated_search_query_param_still_succeeds(self):
+        product_type = ProductTypeFactory(name="Bar LED Model A")
+
+        response = self.client.post(
+            f"/api/product-types/{product_type.pk}/archive/",
+            {"search": "does-not-match"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_delete_race_with_concurrent_registration_is_blocked_not_500(self):
+        # AC-3: if a SerializedItem gets registered between the count()
+        # check and the actual delete (concurrent request), on_delete=PROTECT
+        # raises ProtectedError inside perform_destroy() - this must still
+        # surface as the same structured 400, not an unhandled 500.
+        product_type = ProductTypeFactory()
+
+        with patch(
+            "inventory.views.ProductTypeViewSet.perform_destroy",
+            side_effect=ProtectedError("protected", set()),
+        ):
+            response = self.client.delete(f"/api/product-types/{product_type.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("registered_item_count", response.data)
+        self.assertTrue(ProductType.objects.filter(pk=product_type.pk).exists())
+
+    def test_archive_product_type_keeps_items_intact(self):
+        # AC-4/TC-04
+        product_type = ProductTypeFactory()
+        item = SerializedItemFactory(product_type=product_type)
+
+        response = self.client.post(f"/api/product-types/{product_type.pk}/archive/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["archived"])
+        product_type.refresh_from_db()
+        self.assertTrue(product_type.archived)
+        item.refresh_from_db()
+        self.assertEqual(item.product_type_id, product_type.id)
+
+    def test_archived_product_type_hidden_from_default_list(self):
+        # AC-4/AC-6/TC-06: same list endpoint backs the active-list view
+        # and the SerializedItem registration form's product-type selector.
+        archived = ProductTypeFactory(archived=True)
+        active = ProductTypeFactory()
+
+        response = self.client.get(reverse("producttype-list"))
+
+        ids = [item["id"] for item in response.data]
+        self.assertIn(active.id, ids)
+        self.assertNotIn(archived.id, ids)
 
     def test_created_product_type_appears_in_list(self):
         # AC-1: new product type appears in the product type list
