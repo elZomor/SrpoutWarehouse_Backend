@@ -1,6 +1,7 @@
 from inventory.views.auth import LoginView, LogoutView, MeView
 from inventory.views.category import CategoryViewSet
 from inventory.views.product_type import ProductTypeViewSet
+from inventory.views.purchase_order import PurchaseOrderViewSet
 from inventory.views.serialized_item import SerializedItemViewSet
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "MeView",
     "CategoryViewSet",
     "ProductTypeViewSet",
+    "PurchaseOrderViewSet",
     "SerializedItemViewSet",
 ]
