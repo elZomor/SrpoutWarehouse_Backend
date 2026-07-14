@@ -1,6 +1,8 @@
+from django.db import IntegrityError
 from django.db.models import ProtectedError
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -25,6 +27,20 @@ class ProductTypeViewSet(
     serializer_class = ProductTypeSerializer
     filter_backends = [SearchFilter]
     search_fields = ProductType.SEARCH_FIELDS
+
+    def perform_create(self, serializer):
+        # AC-2: the serializer's UniqueValidator on name is a SELECT-based
+        # pre-check, so two concurrent creates with the same name can both
+        # pass it and race to the INSERT - let the DB's unique constraint be
+        # the real guard and translate its IntegrityError into the same 400
+        # the pre-check would have given (mirrors SerializedItemViewSet's
+        # identical handling of the serial_number race).
+        try:
+            serializer.save()
+        except IntegrityError as exc:
+            raise ValidationError(
+                {"name": "A product type with this name already exists."}
+            ) from exc
 
     def get_queryset(self):
         queryset = super().get_queryset()

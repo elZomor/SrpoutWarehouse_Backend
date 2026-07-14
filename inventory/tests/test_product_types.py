@@ -194,6 +194,25 @@ class ProductTypeTests(APITestCase):
             response.data["name"], ["A product type with this name already exists."]
         )
 
+    def test_create_product_type_duplicate_name_race_still_returns_400(self):
+        # AC-2: simulates two requests racing past the serializer's
+        # SELECT-based UniqueValidator (disabled here to stand in for that
+        # race) so the DB's unique constraint is the only thing left to
+        # catch the duplicate - proves perform_create() translates the
+        # resulting IntegrityError into a 400, not an unhandled 500.
+        ProductTypeFactory(name="Bar LED Model A")
+
+        with patch("rest_framework.validators.UniqueValidator.__call__"):
+            response = self.client.post(
+                reverse("producttype-list"),
+                {"name": "Bar LED Model A", "category": self.category.id},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["name"], "A product type with this name already exists."
+        )
+
     def test_delete_product_type_with_registered_items_is_blocked(self):
         # AC-3/TC-03
         product_type = ProductTypeFactory()
