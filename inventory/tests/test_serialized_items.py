@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from inventory.models import SerializedItem
+from inventory.models import ProductType, SerializedItem
 from inventory.serializers.serialized_item import SerializedItemSerializer
 from inventory.tests.factories import ProductTypeFactory, SerializedItemFactory
 
@@ -200,12 +200,56 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("product_type", response.data)
 
-    def test_detail_route_is_not_registered(self):
-        # WRH-22 only scopes register/list/filter/search - no retrieve/
-        # update/destroy route exists yet for /serialized-items/<pk>/
+    def test_retrieve_and_update_routes_are_not_registered(self):
+        # WRH-22 only scopes register/list/filter/search, and WRH-66 only
+        # adds destroy - retrieve/update remain separate, unscoped stories.
+        # The detail route now exists (for DELETE), so GET/PUT return 405
+        # (method not allowed) rather than 404 (no such route).
         item = SerializedItemFactory(product_type=self.product_type)
         detail_url = f"/api/serialized-items/{item.pk}/"
 
         self.assertEqual(
-            self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            self.client.get(detail_url).status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
+        self.assertEqual(
+            self.client.put(detail_url).status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    def test_delete_serialized_item(self):
+        # TC-01/AC-1: deleting a registered item permanently removes it -
+        # it no longer appears in the list.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        detail_url = f"/api/serialized-items/{item.pk}/"
+
+        response = self.client.delete(detail_url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SerializedItem.objects.filter(pk=item.pk).exists())
+        list_response = self.client.get(reverse("serializeditem-list"))
+        self.assertEqual([i["serial_number"] for i in list_response.data], [])
+
+    def test_delete_one_item_does_not_affect_others(self):
+        # TC-02/AC-2: deleting one item leaves other items, and their
+        # parent product type, untouched.
+        item_to_delete = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        other_item = SerializedItemFactory(
+            serial_number="SN-043", product_type=self.product_type
+        )
+
+        response = self.client.delete(f"/api/serialized-items/{item_to_delete.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        other_item.refresh_from_db()
+        self.assertEqual(other_item.serial_number, "SN-043")
+        self.assertTrue(ProductType.objects.filter(pk=self.product_type.pk).exists())
+
+    def test_delete_unknown_item_404s(self):
+        response = self.client.delete("/api/serialized-items/999999/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
