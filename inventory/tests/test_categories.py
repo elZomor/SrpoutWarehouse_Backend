@@ -1,4 +1,7 @@
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
+from django.db.models import ProtectedError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
@@ -129,6 +132,21 @@ class CategoryTests(APITestCase):
         self.assertEqual(response.data["assigned_product_type_count"], 3)
         self.assertTrue(Category.objects.filter(pk=category.pk).exists())
 
+    def test_delete_blocked_message_is_singular_for_one_product_type(self):
+        # AC-3: "1 product types are" reads wrong - singular noun/verb only
+        # when exactly one Product Type is assigned.
+        category = CategoryFactory()
+        ProductTypeFactory(category=category)
+
+        response = self.client.delete(f"/api/categories/{category.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Cannot delete — 1 product type is assigned to this category. "
+            "Archive it instead.",
+        )
+
     def test_delete_category_with_zero_product_types_succeeds(self):
         # AC-5/TC-05
         category = CategoryFactory()
@@ -137,6 +155,45 @@ class CategoryTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Category.objects.filter(pk=category.pk).exists())
+
+    def test_delete_with_unrelated_search_query_param_still_succeeds(self):
+        # A stray ?search= param (e.g. left over from the list view's search
+        # box) must not affect get_object()'s pk lookup on the detail route -
+        # SearchFilter is only meant to scope the list action.
+        category = CategoryFactory(name="Lighting")
+
+        response = self.client.delete(
+            f"/api/categories/{category.pk}/", {"search": "does-not-match"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Category.objects.filter(pk=category.pk).exists())
+
+    def test_archive_with_unrelated_search_query_param_still_succeeds(self):
+        category = CategoryFactory(name="Lighting")
+
+        response = self.client.post(
+            f"/api/categories/{category.pk}/archive/", {"search": "does-not-match"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_delete_race_with_concurrent_assignment_is_blocked_not_500(self):
+        # AC-3: if a Product Type gets assigned between the count() check and
+        # the actual delete (concurrent request), on_delete=PROTECT raises
+        # ProtectedError inside perform_destroy() - this must still surface
+        # as the same structured 400, not an unhandled 500.
+        category = CategoryFactory()
+
+        with patch(
+            "inventory.views.CategoryViewSet.perform_destroy",
+            side_effect=ProtectedError("protected", set()),
+        ):
+            response = self.client.delete(f"/api/categories/{category.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("assigned_product_type_count", response.data)
+        self.assertTrue(Category.objects.filter(pk=category.pk).exists())
 
     def test_archive_category_keeps_product_types_intact(self):
         # AC-4/TC-04
