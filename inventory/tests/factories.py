@@ -1,6 +1,14 @@
+import datetime
+
 import factory
 
-from inventory.models import Category, ProductType, SerializedItem
+from inventory.models import (
+    Category,
+    ProductType,
+    PurchaseOrder,
+    PurchaseOrderLineItem,
+    SerializedItem,
+)
 
 
 class CategoryFactory(factory.django.DjangoModelFactory):
@@ -28,3 +36,20 @@ class SerializedItemFactory(factory.django.DjangoModelFactory):
     serial_number = factory.Sequence(lambda n: f"SN-{n:04d}")
     product_type = factory.SubFactory(ProductTypeFactory)
     notes = ""
+
+
+class PurchaseOrderFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = PurchaseOrder
+
+    supplier_name = factory.Sequence(lambda n: f"Supplier {n}")
+    order_date = datetime.date(2026, 1, 1)
+
+
+class PurchaseOrderLineItemFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = PurchaseOrderLineItem
+
+    purchase_order = factory.SubFactory(PurchaseOrderFactory)
+    product_type = factory.SubFactory(ProductTypeFactory)
+    expected_quantity = 1
