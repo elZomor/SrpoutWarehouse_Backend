@@ -13,7 +13,9 @@ class SerializedItemSerializer(serializers.ModelSerializer):
     product_type = serializers.PrimaryKeyRelatedField(
         queryset=ProductType.objects.filter(archived=False),
         error_messages={
-            "does_not_exist": "Select a product type that exists and is not archived."
+            "does_not_exist": "Select a product type that exists and is not archived.",
+            "required": "Product type is required.",
+            "null": "Product type is required.",
         },
     )
     product_type_name = serializers.CharField(
@@ -33,3 +35,24 @@ class SerializedItemSerializer(serializers.ModelSerializer):
             "notes",
         ]
         read_only_fields = ["serial", "status", "last_work_order_reference"]
+        extra_kwargs = {
+            "serial_number": {
+                "error_messages": {
+                    "blank": "Serial number is required.",
+                    "required": "Serial number is required.",
+                },
+                # AC-1: the default UniqueValidator's message can't embed the
+                # submitted value, and the ticket wants the exact serial
+                # number echoed back - dropped here in favor of
+                # validate_serial_number() below, which raises with the
+                # value interpolated in.
+                "validators": [],
+            },
+        }
+
+    def validate_serial_number(self, value):
+        if SerializedItem.objects.filter(serial_number=value).exists():
+            raise serializers.ValidationError(
+                f"Serial number {value} is already registered."
+            )
+        return value

@@ -36,11 +36,12 @@ class SerializedItemViewSet(
         try:
             serializer.save()
         except IntegrityError as exc:
+            serial_number = serializer.validated_data["serial_number"]
             raise ValidationError(
                 {
-                    "serial_number": (
-                        "serialized item with this serial number already exists."
-                    )
+                    "serial_number": [
+                        f"Serial number {serial_number} is already registered."
+                    ]
                 }
             ) from exc
 
