@@ -1,5 +1,7 @@
 from django.db import IntegrityError
+from django.http import HttpResponse
 from rest_framework import mixins, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
@@ -41,3 +43,12 @@ class SerializedItemViewSet(
                     )
                 }
             ) from exc
+
+    @action(detail=True, methods=["get"], url_path="qr-code")
+    def qr_code(self, request, pk=None):
+        # Not stored (WRH-22 revision): the QR only ever encodes this item's
+        # own stable UUID, so it's regenerated on every call rather than
+        # kept as a rendered image blob - this is only hit on reprint
+        # (damaged label), never on the normal list/detail path.
+        item = self.get_object()
+        return HttpResponse(item.generate_qr_code_png(), content_type="image/png")

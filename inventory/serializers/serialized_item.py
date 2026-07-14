@@ -21,8 +21,7 @@ class SerializedItemSerializer(serializers.ModelSerializer):
             "product_type",
             "product_type_name",
             "status",
-            "qr_code",
             "last_work_order_reference",
             "notes",
         ]
-        read_only_fields = ["serial", "status", "qr_code", "last_work_order_reference"]
+        read_only_fields = ["serial", "status", "last_work_order_reference"]

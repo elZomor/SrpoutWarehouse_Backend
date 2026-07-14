@@ -19,7 +19,7 @@ class SerializedItemTests(APITestCase):
 
     def test_register_serialized_item(self):
         # TC-01/AC-1: registering a new serial number creates an item with
-        # status "available" and an auto-generated QR code
+        # status "available"
         response = self.client.post(
             reverse("serializeditem-list"),
             {"serial_number": "SN-042", "product_type": self.product_type.id},
@@ -28,19 +28,25 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["serial_number"], "SN-042")
         self.assertEqual(response.data["status"], SerializedItem.STATUS_AVAILABLE)
-        self.assertTrue(response.data["qr_code"])
 
-    def test_qr_code_filename_encodes_item_uuid(self):
-        # TC-02: the QR code is generated from (and named after) the item's
-        # own UUID, not the user-entered serial number
-        response = self.client.post(
-            reverse("serializeditem-list"),
-            {"serial_number": "SN-042", "product_type": self.product_type.id},
+    def test_qr_code_endpoint_returns_png_encoding_item_uuid(self):
+        # TC-02: the QR code is generated on demand from the item's own
+        # UUID (not stored) - the action returns the same PNG bytes the
+        # model's own generator produces for that UUID.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
         )
-        item = SerializedItem.objects.get(id=response.data["id"])
 
-        self.assertEqual(str(item.serial), response.data["serial"])
-        self.assertIn(str(item.serial), item.qr_code.name)
+        response = self.client.get(f"/api/serialized-items/{item.id}/qr-code/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertEqual(response.content, item.generate_qr_code_png())
+
+    def test_qr_code_endpoint_404s_for_unknown_item(self):
+        response = self.client.get("/api/serialized-items/999999/qr-code/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_duplicate_serial_number_is_rejected(self):
         # AC-2: the same serial number cannot be registered twice
