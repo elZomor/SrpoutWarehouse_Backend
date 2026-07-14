@@ -11,15 +11,33 @@ class PurchaseOrderLineItemSerializer(serializers.ModelSerializer):
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True
     )
+    received_quantity = serializers.SerializerMethodField()
+    remaining_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseOrderLineItem
-        fields = ["id", "product_type", "product_type_name", "expected_quantity"]
+        fields = [
+            "id",
+            "product_type",
+            "product_type_name",
+            "expected_quantity",
+            "received_quantity",
+            "remaining_quantity",
+        ]
         extra_kwargs = {
             "expected_quantity": {
                 "error_messages": {"required": "Expected quantity is required."},
             },
         }
+
+    def get_received_quantity(self, obj):
+        # AC-3: "remaining quantity (20) is visible on the PO" - both
+        # counts are derived from the linked SerializedItems (recompute_status()'s
+        # own source of truth) rather than a stored counter that could drift.
+        return obj.serialized_items.count()
+
+    def get_remaining_quantity(self, obj):
+        return max(obj.expected_quantity - obj.serialized_items.count(), 0)
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
@@ -57,3 +75,20 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             for line_item in line_items_data
         )
         return purchase_order
+
+
+class PurchaseOrderReceiveSerializer(serializers.Serializer):
+    # Input-only (AC-1/AC-3): one scanned serial against one line item per
+    # call, matching how a scan gun actually feeds the UI - box-QR scanning
+    # (AC-2) needs a Box/Container model that doesn't exist in this repo
+    # yet (PRD Epic 5, unbuilt), so it's out of scope here.
+    line_item = serializers.PrimaryKeyRelatedField(
+        queryset=PurchaseOrderLineItem.objects.all(),
+        error_messages={"required": "Line item is required."},
+    )
+    serial_number = serializers.CharField(
+        error_messages={
+            "blank": "Serial number is required.",
+            "required": "Serial number is required.",
+        },
+    )
