@@ -1,3 +1,5 @@
+from unittest import mock
+
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
@@ -48,6 +50,23 @@ class SerializedItemTests(APITestCase):
             reverse("serializeditem-list"),
             {"serial_number": "SN-042", "product_type": self.product_type.id},
         )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("serial_number", response.data)
+
+    def test_duplicate_serial_number_race_still_returns_400(self):
+        # AC-2: simulates two requests racing past the serializer's
+        # SELECT-based UniqueValidator (disabled here to stand in for that
+        # race) so the DB's unique constraint is the only thing left to
+        # catch the duplicate - proves perform_create() translates the
+        # resulting IntegrityError into a 400, not an unhandled 500.
+        SerializedItemFactory(serial_number="SN-042", product_type=self.product_type)
+
+        with mock.patch("rest_framework.validators.UniqueValidator.__call__"):
+            response = self.client.post(
+                reverse("serializeditem-list"),
+                {"serial_number": "SN-042", "product_type": self.product_type.id},
+            )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("serial_number", response.data)

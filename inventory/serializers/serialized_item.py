@@ -1,12 +1,13 @@
 from rest_framework import serializers
 
-from inventory.models import ProductType, SerializedItem
+from inventory.models import SerializedItem
 
 
 class SerializedItemSerializer(serializers.ModelSerializer):
-    product_type = serializers.PrimaryKeyRelatedField(
-        queryset=ProductType.objects.all()
-    )
+    # No queryset restriction needed here (unlike ProductTypeSerializer's
+    # category field) - ProductType has no archived/soft-delete state to
+    # exclude, so ModelSerializer's auto-generated PrimaryKeyRelatedField
+    # for this FK is already correct; no explicit declaration needed.
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True
     )

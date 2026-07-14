@@ -45,6 +45,11 @@ class SerializedItem(models.Model):
         self.qr_code.save(filename, ContentFile(buffer.getvalue()), save=False)
 
     def save(self, *args, **kwargs):
+        # Persist the row first: generate_qr_code() writes to storage
+        # immediately, so generating it before this insert/update succeeds
+        # would leave an orphaned file on disk if the DB write fails (e.g. a
+        # racing duplicate serial_number hitting the unique constraint).
+        super().save(*args, **kwargs)
         if not self.qr_code:
             self.generate_qr_code()
-        super().save(*args, **kwargs)
+            super().save(update_fields=["qr_code"])
