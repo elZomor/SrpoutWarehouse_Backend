@@ -18,7 +18,7 @@ For each domain concept, touch all of:
 - **Model** — `inventory/models.py`. If the resource needs search, add a `SEARCH_FIELDS` tuple on the model (matches the existing `Category`/`ProductType` convention) and wire it into the viewset's `search_fields`.
 - **Serializer** — one `ModelSerializer` per model, in `inventory/serializers.py`.
 - **ViewSet** — a DRF viewset in `inventory/views.py` built from `GenericViewSet` + only the mixins the ticket actually scopes (`ListModelMixin`/`CreateModelMixin`/etc.), registered on the `DefaultRouter` in `inventory/urls.py`. Prefer viewsets + router over hand-wired paths so CRUD stays consistent across the app. Add `filter_backends = [SearchFilter]` + `search_fields` when the resource needs search, matching the existing pattern.
-- **Admin** — register every new model in `inventory/admin.py` (project uses `django-unfold` as the admin theme — registrations still use the standard `admin.site.register` / `ModelAdmin` pattern, unfold reskins it automatically).
+- **Admin** — register every new model in `inventory/admin.py` (registrations still use the standard `admin.site.register` / `ModelAdmin` pattern).
 - **Migration** — generate with `python manage.py makemigrations`, never hand-write. CI runs `makemigrations --check --dry-run` and fails if one is missing.
 - **Tests** — one module per resource under `inventory/tests/` (e.g. `test_<resource>.py`), following `test_categories.py`/`test_product_types.py`/`test_auth.py`. Add factories to `inventory/tests/factories.py` (`factory_boy` `DjangoModelFactory`, one per model) rather than building instances by hand.
 
