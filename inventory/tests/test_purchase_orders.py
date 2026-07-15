@@ -378,6 +378,20 @@ class PurchaseOrderReceiveTests(APITestCase):
             SerializedItem.objects.filter(serial_number="SN-ARCH001").exists()
         )
 
+    def test_receive_rejects_scan_past_expected_quantity(self):
+        # A line item that has already received its full expected_quantity
+        # shouldn't silently accept further scans (over-receiving).
+        self.receive(self.line_item, "SN-CAP001")
+        self.receive(self.line_item, "SN-CAP002")
+
+        response = self.receive(self.line_item, "SN-CAP003")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("line_item", response.data)
+        self.assertFalse(
+            SerializedItem.objects.filter(serial_number="SN-CAP003").exists()
+        )
+
     def test_receive_rejects_duplicate_serial_number(self):
         SerializedItem.objects.create(
             serial_number="SN-DUP", product_type=self.product_type
@@ -394,3 +408,19 @@ class PurchaseOrderReceiveTests(APITestCase):
         response = self.receive(self.line_item, "SN-1001")
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class PurchaseOrderRecomputeStatusTests(APITestCase):
+    def test_recompute_status_on_a_po_with_no_line_items_stays_pending(self):
+        # No API path can produce this today (create() requires at least
+        # one line item, and there's no line-item-delete route), but
+        # Django admin's inline can delete every line item off a saved PO -
+        # recompute_status() must not treat an empty PO as "received" just
+        # because all([]) is vacuously True.
+        purchase_order = PurchaseOrderFactory()
+        line_item = PurchaseOrderLineItemFactory(purchase_order=purchase_order)
+        line_item.delete()
+
+        purchase_order.recompute_status()
+
+        self.assertEqual(purchase_order.status, PurchaseOrder.STATUS_PENDING)
