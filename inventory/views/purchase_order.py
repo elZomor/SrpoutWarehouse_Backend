@@ -1,5 +1,5 @@
-from django.db import IntegrityError
-from django.db.models import Count, Prefetch
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Prefetch, prefetch_related_objects
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -15,22 +15,15 @@ from inventory.serializers import (
 from inventory.serializers.serialized_item import duplicate_serial_number_message
 
 
-def _line_items_with_received_count(purchase_order=None):
+def _line_items_queryset():
     # Folds each line item's received count into the same query (one
     # COUNT-per-PO-list, not one per line item) - PurchaseOrderLineItemSerializer
     # reads it off via RECEIVED_COUNT_ANNOTATION instead of calling
     # .count() itself, which would silently issue a fresh query per line
     # item regardless of any prefetch_related on the outer queryset.
-    # Without a purchase_order, returns a Prefetch for the viewset's
-    # list/retrieve queryset; given one, returns a plain queryset scoped to
-    # just that PO's rows, for receive() to reuse as a single fresh fetch
-    # instead of re-fetching the whole PurchaseOrder row a second time.
-    queryset = PurchaseOrderLineItem.objects.select_related("product_type").annotate(
+    return PurchaseOrderLineItem.objects.select_related("product_type").annotate(
         **{RECEIVED_COUNT_ANNOTATION: Count("serialized_items")}
     )
-    if purchase_order is not None:
-        return queryset.filter(purchase_order_id=purchase_order.id)
-    return Prefetch("line_items", queryset=queryset)
 
 
 class PurchaseOrderViewSet(
@@ -42,9 +35,19 @@ class PurchaseOrderViewSet(
     # unregistered for now.
     permission_classes = [IsAuthenticated]
     queryset = PurchaseOrder.objects.prefetch_related(
-        _line_items_with_received_count()
+        Prefetch("line_items", queryset=_line_items_queryset())
     ).all()
     serializer_class = PurchaseOrderSerializer
+
+    def get_queryset(self):
+        # receive() builds its own fresh, single-line-item-scoped query for
+        # its response (see below) and never reads the prefetched
+        # line_items from self.get_object() - the class-level queryset's
+        # prefetch_related JOIN+Count would be fetched and then discarded
+        # on every scan, so skip it for this one action.
+        if self.action == "receive":
+            return PurchaseOrder.objects.all()
+        return super().get_queryset()
 
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
@@ -66,46 +69,60 @@ class PurchaseOrderViewSet(
                 {"line_item": ["Line item does not belong to this purchase order."]}
             )
 
-        # purchase_order.get_object() above may have prefetched line_items
-        # from before this request's mutation, so read the current count
-        # straight from the DB rather than trusting any cache on line_item.
-        received_count = SerializedItem.objects.filter(
-            purchase_order_line_item=line_item
-        ).count()
-        if received_count >= line_item.expected_quantity:
-            raise ValidationError(
-                {
-                    "line_item": [
-                        "This line item has already received its expected quantity."
-                    ]
-                }
+        with transaction.atomic():
+            # select_for_update() locks this line item's row so a
+            # concurrent receive() against the same line item can't read
+            # the same received_count before either commits - without
+            # this, two requests racing the last unit of expected_quantity
+            # could both pass the cap check below (SQLite, used in tests,
+            # has no row-level locking and silently no-ops this; Postgres,
+            # used in production, enforces it).
+            line_item = PurchaseOrderLineItem.objects.select_for_update().get(
+                pk=line_item.pk
             )
+            received_count = SerializedItem.objects.filter(
+                purchase_order_line_item=line_item
+            ).count()
+            if received_count >= line_item.expected_quantity:
+                raise ValidationError(
+                    {
+                        "line_item": [
+                            "This line item has already received its expected"
+                            " quantity."
+                        ]
+                    }
+                )
 
-        try:
-            SerializedItem.objects.create(
-                product_type=line_item.product_type,
-                serial_number=serial_number,
-                purchase_order_line_item=line_item,
+            try:
+                SerializedItem.objects.create(
+                    product_type=line_item.product_type,
+                    serial_number=serial_number,
+                    purchase_order_line_item=line_item,
+                )
+            except IntegrityError as exc:
+                raise ValidationError(
+                    {"serial_number": [duplicate_serial_number_message(serial_number)]}
+                ) from exc
+
+            # purchase_order was fetched with no prefetch at all (see
+            # get_queryset() above), so this is the one place its
+            # line_items relation gets populated - prefetch_related_objects
+            # (Django's public API for this, unlike manually touching
+            # _prefetched_objects_cache) runs a single fresh query and
+            # caches the result on purchase_order.line_items, which both
+            # recompute_status() below and the response serializer then
+            # read with no further query.
+            prefetch_related_objects(
+                [purchase_order],
+                Prefetch(
+                    "line_items",
+                    queryset=_line_items_queryset().filter(
+                        purchase_order_id=purchase_order.id
+                    ),
+                ),
             )
-        except IntegrityError as exc:
-            raise ValidationError(
-                {"serial_number": [duplicate_serial_number_message(serial_number)]}
-            ) from exc
+            purchase_order.recompute_status(line_items=purchase_order.line_items.all())
 
-        # One fresh query, after the create() above, serves both
-        # recompute_status()'s decision and the response - avoids fetching
-        # the PurchaseOrder row a second time (get_object() already fetched
-        # it once above) and avoids computing the same Count() twice.
-        # list() evaluates the queryset, which populates its own
-        # _result_cache; storing that same queryset object (not a bare
-        # list) in _prefetched_objects_cache is required, since
-        # Manager.all() - what the serializer calls when it walks
-        # purchase_order.line_items - returns the cached queryset itself
-        # rather than re-fetching.
-        line_items_queryset = _line_items_with_received_count(purchase_order)
-        line_items = list(line_items_queryset)
-        purchase_order.recompute_status(line_items=line_items)
-        purchase_order._prefetched_objects_cache = {"line_items": line_items_queryset}
         return Response(
             PurchaseOrderSerializer(purchase_order).data,
             status=201,
