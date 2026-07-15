@@ -40,14 +40,15 @@ class PurchaseOrderViewSet(
     serializer_class = PurchaseOrderSerializer
 
     def get_queryset(self):
-        # receive() builds its own fresh, single-line-item-scoped query for
-        # its response (see below) and never reads the prefetched
-        # line_items from self.get_object() - the class-level queryset's
-        # prefetch_related JOIN+Count would be fetched and then discarded
-        # on every scan, so skip it for this one action.
+        queryset = super().get_queryset()
         if self.action == "receive":
-            return PurchaseOrder.objects.all()
-        return super().get_queryset()
+            # receive() builds its own fresh, single-line-item-scoped query
+            # for its response (see below) and never reads the prefetched
+            # line_items from self.get_object() - the class-level
+            # queryset's prefetch_related JOIN+Count would be fetched and
+            # then discarded on every scan, so skip it for this one action.
+            queryset = queryset.prefetch_related(None)
+        return queryset
 
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
@@ -70,16 +71,36 @@ class PurchaseOrderViewSet(
             )
 
         with transaction.atomic():
-            # select_for_update() locks this line item's row so a
-            # concurrent receive() against the same line item can't read
-            # the same received_count before either commits - without
-            # this, two requests racing the last unit of expected_quantity
-            # could both pass the cap check below (SQLite, used in tests,
-            # has no row-level locking and silently no-ops this; Postgres,
-            # used in production, enforces it).
-            line_item = PurchaseOrderLineItem.objects.select_for_update().get(
-                pk=line_item.pk
+            # select_for_update() locks the *parent PurchaseOrder* row, not
+            # just this line item - status is derived from ALL of a PO's
+            # line items (recompute_status() below), so two concurrent
+            # receive() calls against DIFFERENT line items of the same PO
+            # need to serialize here too, not just concurrent scans of the
+            # same line item. Without this, two such calls could each
+            # compute status from a pre-commit snapshot of the other's
+            # write and the later one to commit could persist a stale
+            # status. (SQLite, used in tests, has no row-level locking and
+            # silently no-ops this; Postgres, used in production, enforces
+            # it.)
+            purchase_order = PurchaseOrder.objects.select_for_update().get(
+                pk=purchase_order.pk
             )
+            # Re-fetch line_item now that the lock is held: the serializer
+            # validated it (including the archived-product-type guard)
+            # before the lock was acquired, so a concurrent archive in that
+            # window needs to be caught again now, not just once at request
+            # start.
+            line_item = PurchaseOrderLineItem.objects.select_related(
+                "product_type"
+            ).get(pk=line_item.pk)
+            if line_item.product_type.archived:
+                raise ValidationError(
+                    {
+                        "line_item": [
+                            "Product type is archived and cannot receive new" " items."
+                        ]
+                    }
+                )
             received_count = SerializedItem.objects.filter(
                 purchase_order_line_item=line_item
             ).count()

@@ -1,4 +1,7 @@
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
+from django.db.models.query import QuerySet
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -390,6 +393,31 @@ class PurchaseOrderReceiveTests(APITestCase):
         self.assertIn("line_item", response.data)
         self.assertFalse(
             SerializedItem.objects.filter(serial_number="SN-CAP003").exists()
+        )
+
+    def test_receive_rechecks_archived_status_after_lock_is_acquired(self):
+        # PurchaseOrderReceiveSerializer's queryset filter only catches an
+        # already-archived product type - it can't catch one archived in
+        # the window between that validation and receive()'s
+        # select_for_update()-guarded re-fetch. Simulate a concurrent
+        # archive landing in exactly that window by hooking the first
+        # select_for_update() call inside the atomic block (receive()'s
+        # only call site for it).
+        original_select_for_update = QuerySet.select_for_update
+        product_type = self.product_type
+
+        def archive_then_lock(self, *args, **kwargs):
+            product_type.archived = True
+            product_type.save(update_fields=["archived"])
+            return original_select_for_update(self, *args, **kwargs)
+
+        with patch.object(QuerySet, "select_for_update", archive_then_lock):
+            response = self.receive(self.line_item, "SN-RACE001")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("line_item", response.data)
+        self.assertFalse(
+            SerializedItem.objects.filter(serial_number="SN-RACE001").exists()
         )
 
     def test_receive_rejects_duplicate_serial_number(self):
