@@ -62,10 +62,17 @@ class SerializedItemViewSet(
 
     @action(detail=False, methods=["get"], url_path="qr-pdf")
     def qr_pdf(self, request):
-        # AC-4/AC-5: same DjangoFilterBackend the list action uses, so
-        # ?product_type=<id> scopes the PDF to one product type and the
-        # param omitted (the "All" selection) covers every registered item.
-        queryset = self.filter_queryset(self.get_queryset())
+        # AC-4/AC-5: DjangoFilterBackend directly (not self.filter_queryset,
+        # which would also pull in SearchFilter) so ?product_type=<id>
+        # scopes the PDF to one product type and the param omitted (the
+        # "All" selection) covers every registered item - a stray ?search=
+        # must not silently narrow a label batch the way it's intentionally
+        # allowed to narrow the list view. Matches CategoryViewSet's/
+        # ProductTypeViewSet's convention of keeping SearchFilter scoped to
+        # the list action only.
+        queryset = DjangoFilterBackend().filter_queryset(
+            request, self.get_queryset(), self
+        )
         items = [
             {
                 "serial_number": item.serial_number,
@@ -77,9 +84,12 @@ class SerializedItemViewSet(
             for item in queryset
         ]
         if not items:
-            raise ValidationError(
-                {"detail": ["No serialized items found for the selected product type."]}
+            detail = (
+                "No serialized items found for the selected product type."
+                if request.query_params.get("product_type")
+                else "No serialized items are registered yet."
             )
+            raise ValidationError({"detail": detail})
         html = render_to_string("inventory/qr_labels_pdf.html", {"items": items})
         response = HttpResponse(
             HTML(string=html).write_pdf(), content_type="application/pdf"

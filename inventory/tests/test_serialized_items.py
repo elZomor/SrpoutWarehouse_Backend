@@ -257,18 +257,27 @@ class SerializedItemTests(APITestCase):
     def test_qr_pdf_for_single_product_type(self):
         # TC-05/AC-4: scoping the PDF to one product type only bundles that
         # type's items - a different product type's item must not leak in.
+        # Patches HTML.write_pdf to capture the rendered HTML string
+        # directly, rather than trusting the PDF's opaque bytes, so the
+        # scoping itself (not just the response's status/content-type) is
+        # actually verified.
         SerializedItemFactory(serial_number="SN-001", product_type=self.product_type)
         SerializedItemFactory(serial_number="SN-002", product_type=self.product_type)
         other_type = ProductTypeFactory()
         SerializedItemFactory(serial_number="SN-999", product_type=other_type)
 
-        response = self.client.get(
-            "/api/serialized-items/qr-pdf/", {"product_type": self.product_type.id}
-        )
+        with mock.patch("inventory.views.serialized_item.HTML") as mock_html_class:
+            mock_html_class.return_value.write_pdf.return_value = b"%PDF-fake"
+            response = self.client.get(
+                "/api/serialized-items/qr-pdf/", {"product_type": self.product_type.id}
+            )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response["Content-Type"], "application/pdf")
-        self.assertTrue(response.content.startswith(b"%PDF"))
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn("SN-001", rendered_html)
+        self.assertIn("SN-002", rendered_html)
+        self.assertNotIn("SN-999", rendered_html)
 
     def test_qr_pdf_for_all_product_types(self):
         # TC-06/AC-5: no product_type filter ("All") bundles every
@@ -277,11 +286,15 @@ class SerializedItemTests(APITestCase):
         other_type = ProductTypeFactory()
         SerializedItemFactory(serial_number="SN-999", product_type=other_type)
 
-        response = self.client.get("/api/serialized-items/qr-pdf/")
+        with mock.patch("inventory.views.serialized_item.HTML") as mock_html_class:
+            mock_html_class.return_value.write_pdf.return_value = b"%PDF-fake"
+            response = self.client.get("/api/serialized-items/qr-pdf/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response["Content-Type"], "application/pdf")
-        self.assertTrue(response.content.startswith(b"%PDF"))
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn("SN-001", rendered_html)
+        self.assertIn("SN-999", rendered_html)
 
     def test_qr_pdf_for_product_type_with_no_items_is_rejected(self):
         # AC-4: a product type with zero registered items has nothing to
@@ -293,3 +306,33 @@ class SerializedItemTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "No serialized items found for the selected product type.",
+        )
+
+    def test_qr_pdf_for_all_with_no_items_registered_is_rejected(self):
+        # AC-5: the "All" branch has its own message - it must not claim a
+        # "selected product type" when the user selected none.
+        response = self.client.get("/api/serialized-items/qr-pdf/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"], "No serialized items are registered yet."
+        )
+
+    def test_qr_pdf_ignores_a_stray_search_param(self):
+        # A stray ?search= must not silently narrow the label batch the way
+        # it's intentionally allowed to on the list endpoint - qr_pdf only
+        # honors product_type (via DjangoFilterBackend), not SearchFilter.
+        SerializedItemFactory(serial_number="SN-001", product_type=self.product_type)
+
+        with mock.patch("inventory.views.serialized_item.HTML") as mock_html_class:
+            mock_html_class.return_value.write_pdf.return_value = b"%PDF-fake"
+            response = self.client.get(
+                "/api/serialized-items/qr-pdf/", {"search": "no-match"}
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn("SN-001", rendered_html)
