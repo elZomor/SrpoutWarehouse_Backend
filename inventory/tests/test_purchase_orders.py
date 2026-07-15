@@ -1,7 +1,6 @@
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.db.models.query import QuerySet
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -400,18 +399,23 @@ class PurchaseOrderReceiveTests(APITestCase):
         # already-archived product type - it can't catch one archived in
         # the window between that validation and receive()'s
         # select_for_update()-guarded re-fetch. Simulate a concurrent
-        # archive landing in exactly that window by hooking the first
-        # select_for_update() call inside the atomic block (receive()'s
-        # only call site for it).
-        original_select_for_update = QuerySet.select_for_update
+        # archive landing in exactly that window by hooking receive()'s
+        # one select_for_update() call site directly on PurchaseOrder's
+        # manager, rather than patching QuerySet.select_for_update
+        # globally - scoping the side effect to just this call keeps the
+        # test from silently misfiring if an unrelated select_for_update()
+        # call is ever added elsewhere in the request path.
+        original_select_for_update = PurchaseOrder.objects.select_for_update
         product_type = self.product_type
 
-        def archive_then_lock(self, *args, **kwargs):
+        def archive_then_lock(*args, **kwargs):
             product_type.archived = True
             product_type.save(update_fields=["archived"])
-            return original_select_for_update(self, *args, **kwargs)
+            return original_select_for_update(*args, **kwargs)
 
-        with patch.object(QuerySet, "select_for_update", archive_then_lock):
+        with patch.object(
+            PurchaseOrder.objects, "select_for_update", archive_then_lock
+        ):
             response = self.receive(self.line_item, "SN-RACE001")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

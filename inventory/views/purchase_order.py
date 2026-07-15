@@ -89,10 +89,16 @@ class PurchaseOrderViewSet(
             # validated it (including the archived-product-type guard)
             # before the lock was acquired, so a concurrent archive in that
             # window needs to be caught again now, not just once at request
-            # start.
+            # start. Same reasoning applies to the ownership check just
+            # above - re-verify it against the now-locked purchase_order
+            # rather than trusting the pre-lock read.
             line_item = PurchaseOrderLineItem.objects.select_related(
                 "product_type"
             ).get(pk=line_item.pk)
+            if line_item.purchase_order_id != purchase_order.id:
+                raise ValidationError(
+                    {"line_item": ["Line item does not belong to this purchase order."]}
+                )
             if line_item.product_type.archived:
                 raise ValidationError(
                     {
