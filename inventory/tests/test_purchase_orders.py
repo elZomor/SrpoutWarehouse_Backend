@@ -363,6 +363,21 @@ class PurchaseOrderReceiveTests(APITestCase):
             SerializedItem.objects.filter(serial_number="SN-X001").exists()
         )
 
+    def test_receive_rejects_archived_product_type(self):
+        # Mirrors WRH-21/AC-6's guard on the generic register flow - an
+        # archived product type shouldn't be able to receive new stock
+        # through the PO receive path either.
+        self.product_type.archived = True
+        self.product_type.save(update_fields=["archived"])
+
+        response = self.receive(self.line_item, "SN-ARCH001")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("line_item", response.data)
+        self.assertFalse(
+            SerializedItem.objects.filter(serial_number="SN-ARCH001").exists()
+        )
+
     def test_receive_rejects_duplicate_serial_number(self):
         SerializedItem.objects.create(
             serial_number="SN-DUP", product_type=self.product_type

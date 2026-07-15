@@ -31,13 +31,19 @@ class PurchaseOrderLineItemSerializer(serializers.ModelSerializer):
         }
 
     def get_received_quantity(self, obj):
-        # AC-3: "remaining quantity (20) is visible on the PO" - both
-        # counts are derived from the linked SerializedItems (recompute_status()'s
-        # own source of truth) rather than a stored counter that could drift.
-        return obj.serialized_items.count()
+        # AC-3: "remaining quantity (20) is visible on the PO" - derived from
+        # the linked SerializedItems (recompute_status()'s own source of
+        # truth) rather than a stored counter that could drift. A plain
+        # obj.serialized_items.count() would always issue a fresh COUNT and
+        # ignore the queryset's prefetch_related cache, so prefer the
+        # "received_count" annotation the viewset's queryset attaches; only
+        # line items built outside that queryset (e.g. bulk_create() in
+        # PurchaseOrderSerializer.create()) fall back to a plain count.
+        received = getattr(obj, "received_count", None)
+        return received if received is not None else obj.serialized_items.count()
 
     def get_remaining_quantity(self, obj):
-        return max(obj.expected_quantity - obj.serialized_items.count(), 0)
+        return max(obj.expected_quantity - self.get_received_quantity(obj), 0)
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):

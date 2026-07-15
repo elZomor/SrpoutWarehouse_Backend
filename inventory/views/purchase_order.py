@@ -1,16 +1,31 @@
 from django.db import IntegrityError
+from django.db.models import Count, Prefetch
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from inventory.models import PurchaseOrder, SerializedItem
+from inventory.models import PurchaseOrder, PurchaseOrderLineItem, SerializedItem
 from inventory.serializers import (
     PurchaseOrderReceiveSerializer,
     PurchaseOrderSerializer,
 )
 from inventory.serializers.serialized_item import duplicate_serial_number_message
+
+
+def _line_items_with_received_count():
+    # Folds each line item's received count into the same prefetch query
+    # (one COUNT-per-PO-list, not one per line item) - PurchaseOrderLineItemSerializer
+    # reads it off as "received_count" instead of calling .count() itself,
+    # which would silently issue a fresh query per line item regardless of
+    # any prefetch_related on the outer queryset.
+    return Prefetch(
+        "line_items",
+        queryset=PurchaseOrderLineItem.objects.select_related("product_type").annotate(
+            received_count=Count("serialized_items")
+        ),
+    )
 
 
 class PurchaseOrderViewSet(
@@ -21,11 +36,8 @@ class PurchaseOrderViewSet(
     # is still a separate story, so retrieve/update/destroy stay
     # unregistered for now.
     permission_classes = [IsAuthenticated]
-    # select_related/prefetch_related avoids an N+1 per line item: the
-    # serializer's product_type_name field reads product_type.name on every
-    # nested line item, for every purchase order in the list.
     queryset = PurchaseOrder.objects.prefetch_related(
-        "line_items__product_type", "line_items__serialized_items"
+        _line_items_with_received_count()
     ).all()
     serializer_class = PurchaseOrderSerializer
 
@@ -44,6 +56,17 @@ class PurchaseOrderViewSet(
             raise ValidationError(
                 {"line_item": ["Line item does not belong to this purchase order."]}
             )
+        # Mirrors SerializedItemSerializer's WRH-21/AC-6 guard on the
+        # generic register flow - an archived product type shouldn't grow
+        # new stock through the PO receive path either.
+        if line_item.product_type.archived:
+            raise ValidationError(
+                {
+                    "line_item": [
+                        "Product type is archived and cannot receive new items."
+                    ]
+                }
+            )
 
         try:
             SerializedItem.objects.create(
@@ -57,10 +80,14 @@ class PurchaseOrderViewSet(
             ) from exc
 
         purchase_order.recompute_status()
-        # purchase_order was fetched (and its line_items/serialized_items
-        # prefetched) before the item above was created, so its cache is
-        # one scan stale - re-fetch so the response reflects the scan that
-        # was just recorded, not the state before it.
+        # purchase_order was fetched (and its line_items prefetched, with
+        # each one's received_count annotated) before the item above was
+        # created, so that cache is one scan stale. django.db.models.query.
+        # prefetch_related_objects() will NOT fix this in place: it treats
+        # a relation already present in _prefetched_objects_cache as fetched
+        # and skips re-querying, silently returning the same stale cache.
+        # Re-fetching the row via the same prefetching queryset is what
+        # actually forces a fresh COUNT.
         purchase_order = self.get_queryset().get(pk=purchase_order.pk)
         return Response(
             PurchaseOrderSerializer(purchase_order).data,
