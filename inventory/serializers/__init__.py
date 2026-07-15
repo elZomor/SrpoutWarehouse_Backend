@@ -3,6 +3,7 @@ from inventory.serializers.category import CategorySerializer
 from inventory.serializers.product_type import ProductTypeSerializer
 from inventory.serializers.purchase_order import (
     PurchaseOrderLineItemSerializer,
+    PurchaseOrderReceiveSerializer,
     PurchaseOrderSerializer,
 )
 from inventory.serializers.serialized_item import SerializedItemSerializer
@@ -13,6 +14,7 @@ __all__ = [
     "CategorySerializer",
     "ProductTypeSerializer",
     "PurchaseOrderLineItemSerializer",
+    "PurchaseOrderReceiveSerializer",
     "PurchaseOrderSerializer",
     "SerializedItemSerializer",
 ]

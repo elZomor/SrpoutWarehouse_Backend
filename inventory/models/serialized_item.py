@@ -6,6 +6,7 @@ from django.db import models
 import qrcode
 
 from inventory.models.product_type import ProductType
+from inventory.models.purchase_order_line_item import PurchaseOrderLineItem
 
 
 class SerializedItem(models.Model):
@@ -18,6 +19,17 @@ class SerializedItem(models.Model):
     serial_number = models.CharField(max_length=255, unique=True, db_index=True)
     product_type = models.ForeignKey(
         ProductType, on_delete=models.PROTECT, related_name="serialized_items"
+    )
+    # Only set when this item was created via WRH-56's PO receive flow -
+    # items registered through the generic WRH-22 flow have no PO origin.
+    # PROTECT: a line item with items already received against it shouldn't
+    # be able to vanish out from under them (matches product_type's guard).
+    purchase_order_line_item = models.ForeignKey(
+        PurchaseOrderLineItem,
+        on_delete=models.PROTECT,
+        related_name="serialized_items",
+        null=True,
+        blank=True,
     )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_AVAILABLE
