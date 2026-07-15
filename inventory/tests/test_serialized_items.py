@@ -253,3 +253,43 @@ class SerializedItemTests(APITestCase):
         response = self.client.delete("/api/serialized-items/999999/")
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_qr_pdf_for_single_product_type(self):
+        # TC-05/AC-4: scoping the PDF to one product type only bundles that
+        # type's items - a different product type's item must not leak in.
+        SerializedItemFactory(serial_number="SN-001", product_type=self.product_type)
+        SerializedItemFactory(serial_number="SN-002", product_type=self.product_type)
+        other_type = ProductTypeFactory()
+        SerializedItemFactory(serial_number="SN-999", product_type=other_type)
+
+        response = self.client.get(
+            "/api/serialized-items/qr-pdf/", {"product_type": self.product_type.id}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_qr_pdf_for_all_product_types(self):
+        # TC-06/AC-5: no product_type filter ("All") bundles every
+        # registered item across every product type into one PDF.
+        SerializedItemFactory(serial_number="SN-001", product_type=self.product_type)
+        other_type = ProductTypeFactory()
+        SerializedItemFactory(serial_number="SN-999", product_type=other_type)
+
+        response = self.client.get("/api/serialized-items/qr-pdf/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_qr_pdf_for_product_type_with_no_items_is_rejected(self):
+        # AC-4: a product type with zero registered items has nothing to
+        # bundle - reject rather than silently returning an empty PDF.
+        empty_type = ProductTypeFactory()
+
+        response = self.client.get(
+            "/api/serialized-items/qr-pdf/", {"product_type": empty_type.id}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
