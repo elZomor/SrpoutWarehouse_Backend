@@ -15,6 +15,11 @@ Only log lessons that generalize (would bite again on a different ticket). Skip 
 
 ---
 
+## 2026-07-15 — WRH-24 — a pinned-but-unused native-dependent package broke CI the first time it was actually imported
+- What: `weasyprint` had been pinned in `requirements.txt` since the initial commit (for a future PDF-export feature) but nothing ever imported it, so CI's `test` job — bare `pip install -r requirements-dev.txt` on stock `ubuntu-latest`, no apt-get step — had never actually exercised loading it. `Dockerfile` already `apt-get install`s the native libs WeasyPrint needs (libpango, libcairo, libgdk-pixbuf, shared-mime-info) for the runtime image, but `ci.yml` never mirrored that. The first PR to add `from weasyprint import HTML` (triggered on every test via `inventory.urls` → `inventory.views` package import) would have broken the entire CI test job outright.
+- Fix: added the same apt-get install step to `ci.yml`'s `test` job, mirroring the Dockerfile's package list exactly.
+- Rule: when a ticket's plan involves importing a package that's *pinned but not yet imported anywhere* (check via `git grep -n "^import <pkg>\|^from <pkg>"` before writing the plan) and that package binds to native shared libraries (WeasyPrint, Pillow's less-common codecs, psycopg2 from source, etc.), verify CI actually installs those OS-level libs — don't assume "it's in requirements.txt" or "it works in Docker" means CI can load it. A local dev environment that already happens to have the libs installed system-wide will pass every local check and mask this exact gap.
+
 ## 2026-07-15 — WRH-56 — no cap on a "receive" action means unbounded over-receiving
 - What: `PurchaseOrderViewSet.receive()` created a `SerializedItem` against a PO line item on every valid scan with no check against `expected_quantity` - once a line item hit 100% received, further scans were silently accepted with no error, no cap, and no visible sign anything was wrong.
 - Fix: query the current received count for the target line item before creating the new item, and reject with a 400 if it's already `>= expected_quantity`.
