@@ -1,5 +1,8 @@
+import base64
+
 from django.db import IntegrityError
 from django.http import HttpResponse
+from django.template.loader import render_to_string
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -7,6 +10,7 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 
 from django_filters.rest_framework import DjangoFilterBackend
+from weasyprint import HTML
 
 from inventory.models import SerializedItem
 from inventory.serializers import SerializedItemSerializer
@@ -55,3 +59,40 @@ class SerializedItemViewSet(
         # (damaged label), never on the normal list/detail path.
         item = self.get_object()
         return HttpResponse(item.generate_qr_code_png(), content_type="image/png")
+
+    @action(detail=False, methods=["get"], url_path="qr-pdf")
+    def qr_pdf(self, request):
+        # AC-4/AC-5: DjangoFilterBackend directly (not self.filter_queryset,
+        # which would also pull in SearchFilter) so ?product_type=<id>
+        # scopes the PDF to one product type and the param omitted (the
+        # "All" selection) covers every registered item - a stray ?search=
+        # must not silently narrow a label batch the way it's intentionally
+        # allowed to narrow the list view. Matches CategoryViewSet's/
+        # ProductTypeViewSet's convention of keeping SearchFilter scoped to
+        # the list action only.
+        queryset = DjangoFilterBackend().filter_queryset(
+            request, self.get_queryset(), self
+        )
+        items = [
+            {
+                "serial_number": item.serial_number,
+                "product_type_name": item.product_type.name,
+                "qr_code_base64": base64.b64encode(item.generate_qr_code_png()).decode(
+                    "ascii"
+                ),
+            }
+            for item in queryset
+        ]
+        if not items:
+            detail = (
+                "No serialized items found for the selected product type."
+                if request.query_params.get("product_type")
+                else "No serialized items are registered yet."
+            )
+            raise ValidationError({"detail": detail})
+        html = render_to_string("inventory/qr_labels_pdf.html", {"items": items})
+        response = HttpResponse(
+            HTML(string=html).write_pdf(), content_type="application/pdf"
+        )
+        response["Content-Disposition"] = 'attachment; filename="qr-labels.pdf"'
+        return response

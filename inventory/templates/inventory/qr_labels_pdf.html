@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      @page {
+        size: A4;
+        margin: 1cm;
+      }
+      body {
+        font-family: sans-serif;
+        margin: 0;
+      }
+      .labels {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3cm;
+      }
+      .label {
+        width: 7cm;
+        height: 4cm;
+        box-sizing: border-box;
+        border: 1px dashed #999999;
+        padding: 0.25cm;
+        display: flex;
+        align-items: center;
+        gap: 0.3cm;
+        page-break-inside: avoid;
+      }
+      .label img {
+        width: 3cm;
+        height: 3cm;
+        flex-shrink: 0;
+      }
+      .label .text {
+        font-size: 10pt;
+        overflow: hidden;
+        word-break: break-word;
+      }
+      .label .serial-number {
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="labels">
+      {% for item in items %}
+      <div class="label">
+        <img src="data:image/png;base64,{{ item.qr_code_base64 }}" alt="QR code" />
+        <div class="text">
+          <div class="serial-number">{{ item.serial_number }}</div>
+          <div class="product-type-name">{{ item.product_type_name }}</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </body>
+</html>

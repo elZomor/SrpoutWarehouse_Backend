@@ -62,6 +62,18 @@ jobs:
           cache: "pip"
           cache-dependency-path: requirements-dev.txt
 
+      - name: Install WeasyPrint system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango-1.0-0 \
+            libpangocairo-1.0-0 \
+            libgdk-pixbuf-2.0-0 \
+            libcairo2 \
+            libffi-dev \
+            shared-mime-info \
+            fonts-noto-core
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
