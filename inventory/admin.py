@@ -6,6 +6,8 @@ from inventory.models import (
     PurchaseOrder,
     PurchaseOrderLineItem,
     SerializedItem,
+    WorkOrder,
+    WorkOrderLineItem,
 )
 
 
@@ -41,3 +43,16 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
     list_filter = ("status",)
     search_fields = ("supplier_name",)
     inlines = [PurchaseOrderLineItemInline]
+
+
+class WorkOrderLineItemInline(admin.TabularInline):
+    model = WorkOrderLineItem
+    extra = 0
+
+
+@admin.register(WorkOrder)
+class WorkOrderAdmin(admin.ModelAdmin):
+    list_display = ("id", "job_name", "client_name", "expected_date_out", "status")
+    list_filter = ("status",)
+    search_fields = ("job_name", "client_name")
+    inlines = [WorkOrderLineItemInline]
