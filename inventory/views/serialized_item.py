@@ -1,6 +1,6 @@
 import base64
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.template.loader import render_to_string
 from rest_framework import mixins, status, viewsets
@@ -58,23 +58,32 @@ class SerializedItemViewSet(
         # WRH-54: deleting a reserved (mid-scan) or out (already fulfilled)
         # item would silently corrupt a WorkOrder's live scanned_quantity
         # count and, for an "out" item, erase the fulfillment audit trail
-        # last_work_order_reference records - matches
-        # CategoryViewSet.destroy()'s "block instead of raw delete, return a
-        # 400 with a translatable detail" convention.
+        # last_work_order_reference records - matches CategoryViewSet
+        # .destroy()'s "block instead of raw delete, return a 400 with a
+        # translatable detail" convention. Unlike Category (backed by a real
+        # PROTECT constraint on ProductType), nothing at the DB level stops
+        # this delete - work_order_line_item's PROTECT only guards deleting
+        # the WorkOrderLineItem side, not this one - so the status check
+        # itself needs the row locked: get_object() fetches unlocked, and a
+        # concurrent WorkOrderViewSet.scan() could claim this same item
+        # (its own select_for_update()) in the window between that fetch
+        # and perform_destroy() below.
         instance = self.get_object()
-        if instance.status != SerializedItem.STATUS_AVAILABLE:
-            return Response(
-                {
-                    "detail": (
-                        "Cannot delete — this item is "
-                        f"{instance.get_status_display().lower()} and linked"
-                        " to a work order."
-                    ),
-                    "status": instance.status,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        self.perform_destroy(instance)
+        with transaction.atomic():
+            instance = SerializedItem.objects.select_for_update().get(pk=instance.pk)
+            if instance.status != SerializedItem.STATUS_AVAILABLE:
+                return Response(
+                    {
+                        "detail": (
+                            "Cannot delete — this item is "
+                            f"{instance.get_status_display().lower()} and"
+                            " linked to a work order."
+                        ),
+                        "status": instance.status,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            self.perform_destroy(instance)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["get"], url_path="qr-code")

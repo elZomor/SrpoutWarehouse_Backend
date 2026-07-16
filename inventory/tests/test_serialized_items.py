@@ -277,6 +277,30 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(SerializedItem.objects.filter(pk=item.pk).exists())
 
+    def test_delete_rechecks_status_after_the_lock_is_acquired(self):
+        # WRH-54: simulates a concurrent WorkOrderViewSet.scan() claiming
+        # this item in the window between get_object()'s unlocked fetch and
+        # destroy()'s select_for_update() - matches the same
+        # race-simulation technique as
+        # PurchaseOrderReceiveTests.test_receive_rechecks_archived_status_after_lock_is_acquired.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        original_select_for_update = SerializedItem.objects.select_for_update
+
+        def reserve_then_lock(*args, **kwargs):
+            item.status = SerializedItem.STATUS_RESERVED
+            item.save(update_fields=["status"])
+            return original_select_for_update(*args, **kwargs)
+
+        with mock.patch.object(
+            SerializedItem.objects, "select_for_update", reserve_then_lock
+        ):
+            response = self.client.delete(f"/api/serialized-items/{item.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(SerializedItem.objects.filter(pk=item.pk).exists())
+
     def test_delete_unknown_item_404s(self):
         response = self.client.delete("/api/serialized-items/999999/")
 
