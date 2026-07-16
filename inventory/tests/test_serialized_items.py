@@ -3,7 +3,7 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from inventory.models import ProductType, SerializedItem
 from inventory.serializers.serialized_item import SerializedItemSerializer
@@ -290,6 +290,28 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["serial_number"], "SN-042")
         self.assertNotEqual(response.data["id"], item.pk)
+
+    def test_second_clients_list_drops_item_after_first_client_deletes_it(self):
+        # WRH-67 TC-04: two clients have the same item loaded; client A
+        # deletes it, then client B's list refresh must no longer show it -
+        # no stale reference, no error - rather than assuming this is
+        # implied by the single-client list check in
+        # test_delete_serialized_item above.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        client_b = APIClient()
+        client_b.force_authenticate(user=self.user)
+
+        delete_response = self.client.delete(f"/api/serialized-items/{item.pk}/")
+        list_response = client_b.get(reverse("serializeditem-list"))
+
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [i["serial_number"] for i in list_response.data],
+            [],
+        )
 
     def test_qr_pdf_for_single_product_type(self):
         # TC-05/AC-4: scoping the PDF to one product type only bundles that

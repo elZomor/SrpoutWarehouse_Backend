@@ -15,6 +15,13 @@ Only log lessons that generalize (would bite again on a different ticket). Skip 
 
 ---
 
+## 2026-07-16 — WRH-67 — a ticket's listed Test Case was skipped as "implicitly covered" by an unrelated test
+- What: the ticket's Test Cases table listed TC-04 (concurrent delete + list refresh: client A deletes, client B's list no longer shows the item) as its own boundary-type case. The plan reasoned it was "covered for free" by an existing single-client test that also checks the list post-delete, and skipped writing it - but that existing test never exercises a second client/session, so TC-04's actual scenario (a different session's list view, not the deleting session's own) was never asserted.
+- Fix: added a dedicated test using a second `APIClient` instance (force-authenticated as the same user, modeling a second browser tab) that lists after the first client's delete and asserts the item is gone with a clean 200.
+- Rule: when a ticket enumerates specific Test Cases, treat each one as requiring its own test unless it is *literally* the same assertion against the *same* code path - "another test happens to check something similar" is not the same as covering the stated scenario (different client/session, different concurrency shape, different trigger). Map every listed TC to an actual test by name before considering the ticket's test coverage complete.
+
+---
+
 ## 2026-07-15 — WRH-24 — a pinned-but-unused native-dependent package broke CI the first time it was actually imported
 - What: `weasyprint` had been pinned in `requirements.txt` since the initial commit (for a future PDF-export feature) but nothing ever imported it, so CI's `test` job — bare `pip install -r requirements-dev.txt` on stock `ubuntu-latest`, no apt-get step — had never actually exercised loading it. `Dockerfile` already `apt-get install`s the native libs WeasyPrint needs (libpango, libcairo, libgdk-pixbuf, shared-mime-info) for the runtime image, but `ci.yml` never mirrored that. The first PR to add `from weasyprint import HTML` (triggered on every test via `inventory.urls` → `inventory.views` package import) would have broken the entire CI test job outright.
 - Fix: added the same apt-get install step to `ci.yml`'s `test` job, mirroring the Dockerfile's package list exactly.
