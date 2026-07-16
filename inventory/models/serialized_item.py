@@ -7,13 +7,25 @@ import qrcode
 
 from inventory.models.product_type import ProductType
 from inventory.models.purchase_order_line_item import PurchaseOrderLineItem
+from inventory.models.work_order_line_item import WorkOrderLineItem
 
 
 class SerializedItem(models.Model):
     SEARCH_FIELDS = ("serial_number",)
 
     STATUS_AVAILABLE = "available"
-    STATUS_CHOICES = [(STATUS_AVAILABLE, "Available")]
+    # WRH-54/AC-2: an item scanned against an in-progress WO is "claimed" -
+    # no longer available for another scan/WO - but not yet "out" until the
+    # WO's fulfillment is confirmed (AC-4). Distinct from STATUS_AVAILABLE
+    # so scan()'s "status available" validation naturally rejects a second
+    # scan of the same item without a separate business-rule check.
+    STATUS_RESERVED = "reserved"
+    STATUS_OUT = "out"
+    STATUS_CHOICES = [
+        (STATUS_AVAILABLE, "Available"),
+        (STATUS_RESERVED, "Reserved"),
+        (STATUS_OUT, "Out"),
+    ]
 
     serial = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     serial_number = models.CharField(max_length=255, unique=True, db_index=True)
@@ -31,14 +43,22 @@ class SerializedItem(models.Model):
         null=True,
         blank=True,
     )
+    # Set by WorkOrderViewSet.scan() (WRH-54/AC-2) when this item is claimed
+    # against a WO's line item - PROTECT for the same "shouldn't vanish out
+    # from under it" reason as purchase_order_line_item above.
+    work_order_line_item = models.ForeignKey(
+        WorkOrderLineItem,
+        on_delete=models.PROTECT,
+        related_name="serialized_items",
+        null=True,
+        blank=True,
+    )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_AVAILABLE
     )
     notes = models.TextField(blank=True, default="")
-    # No WorkOrder model exists yet (issuance is a later Delivery Plan phase);
-    # kept as an always-blank placeholder so the list API contract (AC-3)
-    # already carries the field name the frontend needs, populated once
-    # WO issuance ships.
+    # Populated by WorkOrderViewSet.complete() (WRH-54/AC-4) once a WO's
+    # fulfillment is confirmed; blank until then.
     last_work_order_reference = models.CharField(max_length=255, blank=True, default="")
 
     class Meta:
