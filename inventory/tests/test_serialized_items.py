@@ -3,7 +3,7 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from inventory.models import ProductType, SerializedItem
 from inventory.serializers.serialized_item import SerializedItemSerializer
@@ -253,6 +253,65 @@ class SerializedItemTests(APITestCase):
         response = self.client.delete("/api/serialized-items/999999/")
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_deleting_an_already_deleted_item_404s(self):
+        # WRH-67 AC-2/TC-02: a second delete of the same id (stale list,
+        # double-click, second tab) must 404 rather than erroring or
+        # silently succeeding twice - DestroyModelMixin's get_object() no
+        # longer finds the row after the first delete, so this is free
+        # behavior; this test just pins it down as a regression check.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        detail_url = f"/api/serialized-items/{item.pk}/"
+
+        first_response = self.client.delete(detail_url)
+        second_response = self.client.delete(detail_url)
+
+        self.assertEqual(first_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(second_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_deleted_items_serial_number_can_be_reregistered(self):
+        # WRH-67 AC-3/TC-03: the delete-side counterpart of US-003b's
+        # global-uniqueness invariant - a hard delete actually frees the
+        # serial_number unique constraint, so registering a new item with
+        # the same serial number the deleted one used must succeed rather
+        # than being rejected as a duplicate.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        self.client.delete(f"/api/serialized-items/{item.pk}/")
+
+        response = self.client.post(
+            reverse("serializeditem-list"),
+            {"serial_number": "SN-042", "product_type": self.product_type.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["serial_number"], "SN-042")
+        self.assertNotEqual(response.data["id"], item.pk)
+
+    def test_second_clients_list_drops_item_after_first_client_deletes_it(self):
+        # WRH-67 TC-04: two clients have the same item loaded; client A
+        # deletes it, then client B's list refresh must no longer show it -
+        # no stale reference, no error - rather than assuming this is
+        # implied by the single-client list check in
+        # test_delete_serialized_item above.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        client_b = APIClient()
+        client_b.force_authenticate(user=self.user)
+
+        delete_response = self.client.delete(f"/api/serialized-items/{item.pk}/")
+        list_response = client_b.get(reverse("serializeditem-list"))
+
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [i["serial_number"] for i in list_response.data],
+            [],
+        )
 
     def test_qr_pdf_for_single_product_type(self):
         # TC-05/AC-4: scoping the PDF to one product type only bundles that
