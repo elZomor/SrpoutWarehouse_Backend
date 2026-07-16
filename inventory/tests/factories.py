@@ -1,7 +1,6 @@
 import datetime
 
 import factory
-from django.contrib.auth.models import User
 
 from inventory.models import (
     Category,
@@ -9,8 +8,6 @@ from inventory.models import (
     PurchaseOrder,
     PurchaseOrderLineItem,
     SerializedItem,
-    WorkOrder,
-    WorkOrderLineItem,
 )
 
 
@@ -56,31 +53,3 @@ class PurchaseOrderLineItemFactory(factory.django.DjangoModelFactory):
     purchase_order = factory.SubFactory(PurchaseOrderFactory)
     product_type = factory.SubFactory(ProductTypeFactory)
     expected_quantity = 1
-
-
-class UserFactory(factory.django.DjangoModelFactory):
-    class Meta:
-        model = User
-        django_get_or_create = ("username",)
-
-    username = factory.Sequence(lambda n: f"user{n}")
-    email = factory.Sequence(lambda n: f"user{n}@example.com")
-
-
-class WorkOrderFactory(factory.django.DjangoModelFactory):
-    class Meta:
-        model = WorkOrder
-
-    job_name = factory.Sequence(lambda n: f"Job {n}")
-    client_name = ""
-    expected_date_out = datetime.date(2026, 1, 1)
-    created_by = factory.SubFactory(UserFactory)
-
-
-class WorkOrderLineItemFactory(factory.django.DjangoModelFactory):
-    class Meta:
-        model = WorkOrderLineItem
-
-    work_order = factory.SubFactory(WorkOrderFactory)
-    product_type = factory.SubFactory(ProductTypeFactory)
-    quantity = 1

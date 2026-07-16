@@ -160,6 +160,27 @@ class WorkOrderTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("expected_date_out", response.data)
 
+    def test_create_work_order_rejects_archived_product_type(self):
+        # Mirrors WRH-21/AC-6's guard on the generic register flow and
+        # PurchaseOrderReceiveSerializer's identical restriction - an
+        # archived product type shouldn't be requestable on a new WO.
+        self.product_type.archived = True
+        self.product_type.save(update_fields=["archived"])
+
+        response = self.client.post(
+            reverse("workorder-list"),
+            {
+                "job_name": "Summer Gala",
+                "expected_date_out": "2026-08-01",
+                "line_items": [{"product_type": self.product_type.id, "quantity": 5}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("line_items", response.data)
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
     def test_create_work_order_without_line_items_is_rejected(self):
         # AC-1: "with job name, ... and line items" - an empty list isn't a
         # valid WO.
