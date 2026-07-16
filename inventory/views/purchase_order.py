@@ -107,6 +107,8 @@ class PurchaseOrderViewSet(
                         ]
                     }
                 )
+            # WRH-30/AC-4: reject a scan once this line item's expected
+            # quantity has already been reached, rather than over-receiving.
             received_count = SerializedItem.objects.filter(
                 purchase_order_line_item=line_item
             ).count()
@@ -127,6 +129,11 @@ class PurchaseOrderViewSet(
                     purchase_order_line_item=line_item,
                 )
             except IntegrityError as exc:
+                # WRH-30/AC-1: serial numbers are unique system-wide (PRD
+                # §6.1), not just within this PO - the SerializedItem table's
+                # unique constraint enforces that globally, this just turns
+                # the DB-level conflict into the same client-facing message
+                # used by the generic registration path.
                 raise ValidationError(
                     {"serial_number": [duplicate_serial_number_message(serial_number)]}
                 ) from exc

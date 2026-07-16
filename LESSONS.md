@@ -15,6 +15,13 @@ Only log lessons that generalize (would bite again on a different ticket). Skip 
 
 ---
 
+## 2026-07-16 — WRH-30 — a ticket's AC required a model that doesn't exist yet, and 4/5 of its other ACs were already shipped by earlier tickets
+- What: WRH-30 (Stock Receiving field/business-rule validation) listed 5 ACs. AC-1 (duplicate serial), AC-2 (supplier name required), AC-3 (line items required), and AC-4 (over-receipt cap) were already fully implemented and covered by existing tests from WRH-29/WRH-56, with the *same* code path and *same* assertion the ticket's own Test Cases table describes - per the WRH-67 rule below, that's real coverage, not "implicitly covered by something similar," so no new tests were added for them. AC-5 (a scanned box's product type must match the PO line item's) can't be implemented at all: the `receive()` endpoint takes an explicit `line_item` id + `serial_number`, not a box QR - there is no box-scan input to mismatch-check against until a Box/Container model exists, which WRH-56's own code comment already flagged as unbuilt (PRD Epic 5).
+- Fix: shipped a doc-only PR - added `WRH-30/AC-n` cross-references in the existing serializer/view comments so the pre-existing checks are traceable to this ticket, and logged this entry instead of building the Box model as an undersized side-quest of a 3-point validation story. AC-5 stays open, tracked under the Box/Container epic (WRH-5).
+- Rule: before planning implementation work for a ticket, check whether its ACs are already satisfied by a previous ticket's code (`git log`/existing tests) - a story can be "done" with zero production-code diff. Separately, if an AC needs a model/entity that doesn't exist yet, that's a scope call for the user (pull the model in now vs. defer), not something to build unprompted or silently skip - stop and ask rather than guessing either way.
+
+---
+
 ## 2026-07-16 — WRH-67 — a ticket's listed Test Case was skipped as "implicitly covered" by an unrelated test
 - What: the ticket's Test Cases table listed TC-04 (concurrent delete + list refresh: client A deletes, client B's list no longer shows the item) as its own boundary-type case. The plan reasoned it was "covered for free" by an existing single-client test that also checks the list post-delete, and skipped writing it - but that existing test never exercises a second client/session, so TC-04's actual scenario (a different session's list view, not the deleting session's own) was never asserted.
 - Fix: added a dedicated test using a second `APIClient` instance (force-authenticated as the same user, modeling a second browser tab) that lists after the first client's delete and asserts the item is gone with a clean 200.

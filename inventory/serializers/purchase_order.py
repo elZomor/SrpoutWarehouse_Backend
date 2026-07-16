@@ -60,6 +60,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         read_only_fields = ["status"]
         extra_kwargs = {
             "supplier_name": {
+                # WRH-30/AC-2: supplier name is a required field on PO create.
                 "error_messages": {
                     "blank": "Supplier name is required.",
                     "required": "Supplier name is required.",
@@ -71,7 +72,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         }
 
     def validate_line_items(self, value):
-        # AC-1: a PO needs one or more line items.
+        # AC-1: a PO needs one or more line items. (Also WRH-30/AC-3.)
         if not value:
             raise serializers.ValidationError("At least one line item is required.")
         return value
@@ -90,7 +91,10 @@ class PurchaseOrderReceiveSerializer(serializers.Serializer):
     # Input-only (AC-1/AC-3): one scanned serial against one line item per
     # call, matching how a scan gun actually feeds the UI - box-QR scanning
     # (AC-2) needs a Box/Container model that doesn't exist in this repo
-    # yet (PRD Epic 5, unbuilt), so it's out of scope here.
+    # yet (PRD Epic 5, unbuilt), so it's out of scope here. Same gap blocks
+    # WRH-30/AC-5 (box QR product-type mismatch) - there is no box-QR input
+    # to mismatch-check against until the Box/Container model lands (see
+    # LESSONS.md's WRH-30 entry and the WRH-5 epic).
     #
     # AC-6/WRH-21: an archived product type shouldn't receive new stock
     # through this path either - restrict the write-side queryset the same
