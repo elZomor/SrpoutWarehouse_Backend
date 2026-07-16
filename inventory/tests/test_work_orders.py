@@ -424,6 +424,22 @@ class WorkOrderScanTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("serial_number", response.data)
 
+    def test_scan_rejects_scan_past_requested_quantity(self):
+        # AC-2/AC-4: self.line_item has quantity=3 - a 4th distinct,
+        # otherwise-valid scan must not silently over-fulfil it, matching
+        # PurchaseOrderViewSet.receive()'s identical WRH-30/AC-4 guard.
+        for _ in range(3):
+            item = SerializedItemFactory(product_type=self.product_type)
+            self.scan(self.line_item, item.serial_number)
+        extra_item = SerializedItemFactory(product_type=self.product_type)
+
+        response = self.scan(self.line_item, extra_item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("line_item", response.data)
+        extra_item.refresh_from_db()
+        self.assertEqual(extra_item.status, SerializedItem.STATUS_AVAILABLE)
+
     def test_scan_rejects_a_line_item_from_a_different_work_order(self):
         other_line_item = WorkOrderLineItemFactory(product_type=self.product_type)
         item = SerializedItemFactory(product_type=self.product_type)

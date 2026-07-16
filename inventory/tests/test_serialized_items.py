@@ -249,6 +249,34 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(other_item.serial_number, "SN-043")
         self.assertTrue(ProductType.objects.filter(pk=self.product_type.pk).exists())
 
+    def test_delete_blocks_a_reserved_item(self):
+        # WRH-54: a reserved item is mid-scan against a WorkOrder - deleting
+        # it would silently corrupt that WO's live scanned_quantity count.
+        item = SerializedItemFactory(
+            serial_number="SN-042",
+            product_type=self.product_type,
+            status=SerializedItem.STATUS_RESERVED,
+        )
+
+        response = self.client.delete(f"/api/serialized-items/{item.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(SerializedItem.objects.filter(pk=item.pk).exists())
+
+    def test_delete_blocks_an_out_item(self):
+        # WRH-54: an "out" item is part of a fulfilled WO's audit trail
+        # (last_work_order_reference) - deleting it would erase that record.
+        item = SerializedItemFactory(
+            serial_number="SN-042",
+            product_type=self.product_type,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response = self.client.delete(f"/api/serialized-items/{item.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(SerializedItem.objects.filter(pk=item.pk).exists())
+
     def test_delete_unknown_item_404s(self):
         response = self.client.delete("/api/serialized-items/999999/")
 

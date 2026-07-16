@@ -130,6 +130,23 @@ class WorkOrderViewSet(
                 raise ValidationError(
                     {"line_item": ["Line item does not belong to this work order."]}
                 )
+            # AC-2/AC-4: reject a scan once this line item's requested
+            # quantity has already been reached, rather than over-scanning -
+            # matches PurchaseOrderViewSet.receive()'s identical
+            # WRH-30/AC-4 cap check on the same kind of "claim against a
+            # requested quantity" flow.
+            scanned_count = SerializedItem.objects.filter(
+                work_order_line_item=line_item
+            ).count()
+            if scanned_count >= line_item.quantity:
+                raise ValidationError(
+                    {
+                        "line_item": [
+                            "This line item has already reached its requested"
+                            " quantity."
+                        ]
+                    }
+                )
 
             # Lock the target SerializedItem row too - it's the row whose
             # own invariant ("claimed at most once") this action protects,
