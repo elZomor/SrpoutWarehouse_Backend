@@ -120,9 +120,16 @@ class WorkOrderViewSet(
                     Prefetch("line_items", queryset=_active_line_items_queryset()),
                     Prefetch(
                         "supplementaries",
-                        queryset=WorkOrder.objects.order_by(
-                            "-expected_date_out", "-id"
-                        ).prefetch_related(
+                        # Same "a fully returned WO is done" exclusion as
+                        # the primary-level queryset above - a
+                        # supplementary can independently reach
+                        # STATUS_RETURNED too, and should stop nesting
+                        # under its (still-active) primary once it does.
+                        queryset=WorkOrder.objects.exclude(
+                            status=WorkOrder.STATUS_RETURNED
+                        )
+                        .order_by("-expected_date_out", "-id")
+                        .prefetch_related(
                             Prefetch(
                                 "line_items", queryset=_active_line_items_queryset()
                             )

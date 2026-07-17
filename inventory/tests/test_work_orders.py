@@ -1072,6 +1072,27 @@ class WorkOrderActiveListTests(APITestCase):
         ids = [row["id"] for row in response.data]
         self.assertEqual(ids, [still_active.id])
 
+    def test_active_list_excludes_a_fully_returned_supplementary(self):
+        # Same exclusion, one level deeper: a supplementary can
+        # independently reach STATUS_RETURNED and shouldn't keep nesting
+        # under its still-active primary once it does.
+        primary = WorkOrderFactory(created_by=self.user)
+        WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            status=WorkOrder.STATUS_RETURNED,
+        )
+        still_active_supplementary = WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            status=WorkOrder.STATUS_PARTIALLY_RETURNED,
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        supplementary_ids = [s["id"] for s in response.data[0]["supplementaries"]]
+        self.assertEqual(supplementary_ids, [still_active_supplementary.id])
+
     def test_active_list_excludes_supplementaries_from_the_top_level(self):
         primary = WorkOrderFactory(created_by=self.user)
         WorkOrderFactory(created_by=self.user, parent_work_order=primary)
