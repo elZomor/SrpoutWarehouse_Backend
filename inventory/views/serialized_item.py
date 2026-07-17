@@ -1,7 +1,7 @@
 import base64
 
 from django.db import IntegrityError, transaction
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse
 from django.template.loader import render_to_string
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -70,7 +70,19 @@ class SerializedItemViewSet(
         # and perform_destroy() below.
         instance = self.get_object()
         with transaction.atomic():
-            instance = SerializedItem.objects.select_for_update().get(pk=instance.pk)
+            try:
+                instance = SerializedItem.objects.select_for_update().get(
+                    pk=instance.pk
+                )
+            except SerializedItem.DoesNotExist:
+                # A second, truly concurrent delete of the same item can
+                # win the race between get_object()'s unlocked fetch above
+                # and this locked re-fetch - DRF's default exception
+                # handler already translates Http404 into a clean 404
+                # (the same mechanism get_object() itself uses), matching
+                # the sequential double-delete case's existing behavior
+                # rather than leaking an unhandled 500 here.
+                raise Http404
             if instance.status != SerializedItem.STATUS_AVAILABLE:
                 return Response(
                     {

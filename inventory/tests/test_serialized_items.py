@@ -301,6 +301,27 @@ class SerializedItemTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(SerializedItem.objects.filter(pk=item.pk).exists())
 
+    def test_delete_404s_instead_of_500ing_on_a_truly_concurrent_double_delete(self):
+        # WRH-54: a second delete winning the race between get_object()'s
+        # unlocked fetch and destroy()'s locked re-fetch must 404 cleanly,
+        # not leak an unhandled 500 from the locked SerializedItem.get()
+        # raising DoesNotExist.
+        item = SerializedItemFactory(
+            serial_number="SN-042", product_type=self.product_type
+        )
+        original_select_for_update = SerializedItem.objects.select_for_update
+
+        def delete_then_lock(*args, **kwargs):
+            SerializedItem.objects.filter(pk=item.pk).delete()
+            return original_select_for_update(*args, **kwargs)
+
+        with mock.patch.object(
+            SerializedItem.objects, "select_for_update", delete_then_lock
+        ):
+            response = self.client.delete(f"/api/serialized-items/{item.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_delete_unknown_item_404s(self):
         response = self.client.delete("/api/serialized-items/999999/")
 
