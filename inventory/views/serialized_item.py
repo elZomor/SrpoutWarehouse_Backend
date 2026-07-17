@@ -1,13 +1,14 @@
 import base64
 
-from django.db import IntegrityError
-from django.http import HttpResponse
+from django.db import IntegrityError, transaction
+from django.http import Http404, HttpResponse
 from django.template.loader import render_to_string
-from rest_framework import mixins, viewsets
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 from weasyprint import HTML
@@ -24,9 +25,11 @@ class SerializedItemViewSet(
     viewsets.GenericViewSet,
 ):
     # WRH-22 (PRD story US-003a) scoped register/list/filter/search; WRH-66
-    # (US-003e) adds destroy - a hard delete, since no downstream resource
-    # references a SerializedItem by FK yet (WorkOrder doesn't exist), so
-    # unlike Category->ProductType there's no ProtectedError to catch here.
+    # (US-003e) adds destroy. WRH-54 (US-013a) later gave SerializedItem a
+    # downstream FK (work_order_line_item) plus reserved/out statuses -
+    # destroy() below blocks deleting a claimed item instead of the hard,
+    # unconditional delete this viewset started with, since PROTECT on that
+    # FK only guards the WorkOrderLineItem side, not this one.
     # retrieve/update are still separate, unscoped stories.
     permission_classes = [IsAuthenticated]
     # select_related avoids an N+1 query per row: the serializer's
@@ -50,6 +53,50 @@ class SerializedItemViewSet(
             raise ValidationError(
                 {"serial_number": [duplicate_serial_number_message(serial_number)]}
             ) from exc
+
+    def destroy(self, request, *args, **kwargs):
+        # WRH-54: deleting a reserved (mid-scan) or out (already fulfilled)
+        # item would silently corrupt a WorkOrder's live scanned_quantity
+        # count and, for an "out" item, erase the fulfillment audit trail
+        # last_work_order_reference records - matches CategoryViewSet
+        # .destroy()'s "block instead of raw delete, return a 400 with a
+        # translatable detail" convention. Unlike Category (backed by a real
+        # PROTECT constraint on ProductType), nothing at the DB level stops
+        # this delete - work_order_line_item's PROTECT only guards deleting
+        # the WorkOrderLineItem side, not this one - so the status check
+        # itself needs the row locked: get_object() fetches unlocked, and a
+        # concurrent WorkOrderViewSet.scan() could claim this same item
+        # (its own select_for_update()) in the window between that fetch
+        # and perform_destroy() below.
+        instance = self.get_object()
+        with transaction.atomic():
+            try:
+                instance = SerializedItem.objects.select_for_update().get(
+                    pk=instance.pk
+                )
+            except SerializedItem.DoesNotExist:
+                # A second, truly concurrent delete of the same item can
+                # win the race between get_object()'s unlocked fetch above
+                # and this locked re-fetch - DRF's default exception
+                # handler already translates Http404 into a clean 404
+                # (the same mechanism get_object() itself uses), matching
+                # the sequential double-delete case's existing behavior
+                # rather than leaking an unhandled 500 here.
+                raise Http404
+            if instance.status != SerializedItem.STATUS_AVAILABLE:
+                return Response(
+                    {
+                        "detail": (
+                            "Cannot delete — this item is "
+                            f"{instance.get_status_display().lower()} and"
+                            " linked to a work order."
+                        ),
+                        "status": instance.status,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["get"], url_path="qr-code")
     def qr_code(self, request, pk=None):

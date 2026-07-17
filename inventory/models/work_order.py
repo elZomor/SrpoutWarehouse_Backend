@@ -1,11 +1,22 @@
 from django.contrib.auth.models import User
 from django.db import models
 
+# Shared between WorkOrderViewSet's scan()/complete() actions and
+# WorkOrderLineItemSerializer.get_scanned_quantity() - both sides of this
+# annotation need to agree on the same name, so it's named once here
+# (rather than duplicated as a string literal in views/ and serializers/),
+# matching PurchaseOrder's identical RECEIVED_COUNT_ANNOTATION convention.
+SCANNED_COUNT_ANNOTATION = "scanned_count"
+
 
 class WorkOrder(models.Model):
     STATUS_DRAFT = "draft"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_FULFILLED = "fulfilled"
     STATUS_CHOICES = [
         (STATUS_DRAFT, "Draft"),
+        (STATUS_IN_PROGRESS, "In progress"),
+        (STATUS_FULFILLED, "Fulfilled"),
     ]
 
     job_name = models.CharField(max_length=255)

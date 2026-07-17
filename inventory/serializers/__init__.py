@@ -9,6 +9,7 @@ from inventory.serializers.purchase_order import (
 from inventory.serializers.serialized_item import SerializedItemSerializer
 from inventory.serializers.work_order import (
     WorkOrderLineItemSerializer,
+    WorkOrderScanSerializer,
     WorkOrderSerializer,
 )
 
@@ -22,5 +23,6 @@ __all__ = [
     "PurchaseOrderSerializer",
     "SerializedItemSerializer",
     "WorkOrderLineItemSerializer",
+    "WorkOrderScanSerializer",
     "WorkOrderSerializer",
 ]

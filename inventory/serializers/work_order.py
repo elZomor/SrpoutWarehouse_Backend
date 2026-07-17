@@ -2,6 +2,7 @@ from django.db import transaction
 from rest_framework import serializers
 
 from inventory.models import ProductType, WorkOrder, WorkOrderLineItem
+from inventory.models.work_order import SCANNED_COUNT_ANNOTATION
 
 
 class WorkOrderLineItemSerializer(serializers.ModelSerializer):
@@ -17,10 +18,36 @@ class WorkOrderLineItemSerializer(serializers.ModelSerializer):
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True
     )
+    scanned_quantity = serializers.SerializerMethodField()
+    remaining_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkOrderLineItem
-        fields = ["id", "product_type", "product_type_name", "quantity"]
+        fields = [
+            "id",
+            "product_type",
+            "product_type_name",
+            "quantity",
+            "scanned_quantity",
+            "remaining_quantity",
+        ]
+
+    def get_scanned_quantity(self, obj):
+        # AC-2: "a live counter updates per line item, e.g. 23/50 scanned" -
+        # derived from linked SerializedItems (reserved or out both count -
+        # a scan claims progress immediately, confirmation only flips their
+        # status) rather than a stored counter, mirroring
+        # PurchaseOrderLineItemSerializer.get_received_quantity()'s same
+        # reasoning. Every queryset that reaches this serializer (list,
+        # scan, complete) attaches SCANNED_COUNT_ANNOTATION to avoid an N+1
+        # COUNT per line item; the plain .serialized_items.count() fallback
+        # only exists for WorkOrderSerializer.create()'s response, where the
+        # just-bulk_created line items are guaranteed zero scans.
+        scanned = getattr(obj, SCANNED_COUNT_ANNOTATION, None)
+        return scanned if scanned is not None else obj.serialized_items.count()
+
+    def get_remaining_quantity(self, obj):
+        return max(obj.quantity - self.get_scanned_quantity(obj), 0)
 
 
 class WorkOrderSerializer(serializers.ModelSerializer):
@@ -66,3 +93,32 @@ class WorkOrderSerializer(serializers.ModelSerializer):
                 for line_item in line_items_data
             )
         return work_order
+
+
+class WorkOrderScanSerializer(serializers.Serializer):
+    # Input-only (AC-2): one scanned serial against one line item per call,
+    # matching PurchaseOrderReceiveSerializer's identical shape for the same
+    # scan-gun-driven flow. Box-QR scanning (AC-3) needs a Box/Container
+    # model that doesn't exist in this repo yet (PRD Epic 5, unbuilt, same
+    # gap WRH-30 hit) - out of scope here, deferred to WRH-5 alongside it.
+    #
+    # Archived product types are excluded the same way
+    # WorkOrderLineItemSerializer.product_type restricts them at create time
+    # - a line item's product type can't be archived after the WO is
+    # created (no archive-after-create path exists), but the queryset
+    # mirrors the established pattern regardless.
+    line_item = serializers.PrimaryKeyRelatedField(
+        queryset=WorkOrderLineItem.objects.filter(product_type__archived=False),
+        error_messages={
+            "required": "Line item is required.",
+            "does_not_exist": (
+                "Select a line item whose product type exists and is not archived."
+            ),
+        },
+    )
+    serial_number = serializers.CharField(
+        error_messages={
+            "blank": "Serial number is required.",
+            "required": "Serial number is required.",
+        },
+    )
