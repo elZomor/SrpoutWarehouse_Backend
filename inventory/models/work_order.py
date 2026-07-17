@@ -1,4 +1,5 @@
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.db import models
 
 # Shared between WorkOrderViewSet's scan()/complete() actions and
@@ -61,3 +62,23 @@ class WorkOrder(models.Model):
 
     def __str__(self):
         return f"WO-{self.id} ({self.job_name})"
+
+    def clean(self):
+        # WRH-33/AC-6: only a Primary WO (parent_work_order is null) can be
+        # a parent - a supplementary can't itself have supplementaries.
+        # There's no API path that sets parent_work_order yet (WRH-55's own
+        # comment on the field above), but Django admin's default
+        # ModelForm calls full_clean() and exposes every model field
+        # unrestricted, so this guard is reachable today even with no
+        # dedicated create endpoint - matches the WRH-56 lesson that admin
+        # is a real caller, not just the registered API routes.
+        super().clean()
+        if self.parent_work_order_id and self.parent_work_order.parent_work_order_id:
+            raise ValidationError(
+                {
+                    "parent_work_order": (
+                        "A supplementary work order cannot itself be the"
+                        " parent of another supplementary work order."
+                    )
+                }
+            )

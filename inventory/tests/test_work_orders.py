@@ -1,6 +1,8 @@
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -492,10 +494,11 @@ class WorkOrderScanTests(APITestCase):
         self.assertEqual(line_item_data["remaining_quantity"], 1)
 
     def test_scan_rejects_a_nonexistent_serial_number(self):
+        # AC-4/TC-04
         response = self.scan(self.line_item, "SN-DOES-NOT-EXIST")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("serial_number", response.data)
+        self.assertEqual(response.data["serial_number"], ["Serial not found"])
 
     def test_scan_rejects_an_item_with_a_different_product_type(self):
         other_type = ProductTypeFactory()
@@ -518,14 +521,55 @@ class WorkOrderScanTests(APITestCase):
         self.assertIn("serial_number", response.data)
 
     def test_scan_rejects_an_item_already_out(self):
+        # AC-1/TC-01: rejected with the specific "currently out on WO-N"
+        # error, naming the *other* WO it's already out on.
+        other_work_order = WorkOrderFactory()
+        other_line_item = WorkOrderLineItemFactory(
+            work_order=other_work_order, product_type=self.product_type
+        )
         item = SerializedItemFactory(
-            product_type=self.product_type, status=SerializedItem.STATUS_OUT
+            product_type=self.product_type,
+            status=SerializedItem.STATUS_OUT,
+            work_order_line_item=other_line_item,
         )
 
         response = self.scan(self.line_item, item.serial_number)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("serial_number", response.data)
+        self.assertEqual(
+            response.data["serial_number"],
+            [f"{item.serial_number} is currently out on" f" WO-{other_work_order.id}"],
+        )
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+    def test_scan_rejects_a_damaged_item(self):
+        # AC-3/TC-03
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_DAMAGED
+        )
+
+        response = self.scan(self.line_item, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [f"{item.serial_number} is damaged and cannot be issued"],
+        )
+
+    def test_scan_rejects_a_missing_item(self):
+        # AC-3/TC-03
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_MISSING
+        )
+
+        response = self.scan(self.line_item, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [f"{item.serial_number} is missing and cannot be issued"],
+        )
 
     def test_scan_rejects_scan_past_requested_quantity(self):
         # AC-2/AC-4: self.line_item has quantity=3 - a 4th distinct,
@@ -567,6 +611,39 @@ class WorkOrderScanTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("status", response.data)
+
+    def _assert_scan_blocked_for_status(self, wo_status):
+        # AC-5/TC-05: fulfillment scanning only applies to draft ->
+        # in_progress WOs - "returned"/"closed" aren't reachable through any
+        # status transition yet (no return/close flow exists - see
+        # WorkOrder.STATUS_CHOICES's comment), so they're set directly here
+        # the same way the model itself would tolerate a value outside
+        # STATUS_CHOICES (Django doesn't enforce choices at save() time).
+        work_order = WorkOrderFactory(status=wo_status)
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type
+        )
+        item = SerializedItemFactory(product_type=self.product_type)
+
+        response = self.client.post(
+            reverse("workorder-scan", args=[work_order.id]),
+            {"line_item": line_item.id, "serial_number": item.serial_number},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+
+    def test_scan_rejects_when_work_order_is_fulfilled(self):
+        self._assert_scan_blocked_for_status(WorkOrder.STATUS_FULFILLED)
+
+    def test_scan_rejects_when_work_order_is_returned(self):
+        self._assert_scan_blocked_for_status("returned")
+
+    def test_scan_rejects_when_work_order_is_closed(self):
+        self._assert_scan_blocked_for_status("closed")
 
     def test_scan_requires_authentication(self):
         self.client.force_authenticate(user=None)
@@ -830,3 +907,29 @@ class WorkOrderDetailTests(APITestCase):
         response = self.client.get(reverse("workorder-detail", args=[work_order.id]))
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WorkOrderSupplementaryHierarchyTests(TestCase):
+    def test_supplementary_work_order_cannot_be_a_parent(self):
+        # AC-6/TC-06: "WO-0042-S1" (a supplementary) can't itself be the
+        # parent of another supplementary. No create endpoint sets
+        # parent_work_order yet, so this exercises the model's own clean()
+        # guard directly - the same validation Django admin's ModelForm
+        # would trigger via full_clean().
+        primary = WorkOrderFactory()
+        supplementary = WorkOrderFactory(parent_work_order=primary)
+        # save() doesn't call clean() - construct via the factory (so every
+        # other required field is already valid) and call full_clean()
+        # separately to isolate the guard under test.
+        second_supplementary = WorkOrderFactory(parent_work_order=supplementary)
+
+        with self.assertRaises(ValidationError) as ctx:
+            second_supplementary.full_clean()
+
+        self.assertIn("parent_work_order", ctx.exception.message_dict)
+
+    def test_supplementary_of_a_primary_is_allowed(self):
+        primary = WorkOrderFactory()
+        supplementary = WorkOrderFactory(parent_work_order=primary)
+
+        supplementary.full_clean()

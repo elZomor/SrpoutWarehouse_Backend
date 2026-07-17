@@ -21,10 +21,19 @@ class SerializedItem(models.Model):
     # scan of the same item without a separate business-rule check.
     STATUS_RESERVED = "reserved"
     STATUS_OUT = "out"
+    # WRH-33/AC-3: an item can be flagged damaged/missing so fulfillment
+    # scanning rejects it with a status-specific reason. Nothing yet sets an
+    # item to either status (that's the separate, unbuilt Item Status
+    # Lifecycle §6.2 workflow) - these values exist purely so scan()'s
+    # rejection logic below has a real status to check against.
+    STATUS_DAMAGED = "damaged"
+    STATUS_MISSING = "missing"
     STATUS_CHOICES = [
         (STATUS_AVAILABLE, "Available"),
         (STATUS_RESERVED, "Reserved"),
         (STATUS_OUT, "Out"),
+        (STATUS_DAMAGED, "Damaged"),
+        (STATUS_MISSING, "Missing"),
     ]
 
     serial = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
