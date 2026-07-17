@@ -11,10 +11,12 @@ SCANNED_COUNT_ANNOTATION = "scanned_count"
 
 # WRH-55/AC-2: "per-type returned vs. still-out counts" on the active-WOs
 # list - distinct from SCANNED_COUNT_ANNOTATION (fulfillment progress
-# against the requested quantity). still_out = claimed items confirmed out
-# (SerializedItem.STATUS_OUT); returned = the same items once
-# WorkOrderViewSet.return_item() (WRH-38) flips them back to
-# STATUS_AVAILABLE.
+# against the requested quantity). returned = items WorkOrderViewSet.
+# return_item() (WRH-38) has flipped back to STATUS_AVAILABLE; still_out =
+# every other status an issued item can be in (out/reserved/damaged/
+# missing) - not just STATUS_OUT - so the two counts always sum to the line
+# item's quantity instead of a damaged/missing item silently vanishing from
+# the summary.
 RETURNED_COUNT_ANNOTATION = "returned_count"
 STILL_OUT_COUNT_ANNOTATION = "still_out_count"
 

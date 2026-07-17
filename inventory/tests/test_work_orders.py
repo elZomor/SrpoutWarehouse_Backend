@@ -813,6 +813,20 @@ class WorkOrderReturnItemTests(APITestCase):
             status=SerializedItem.STATUS_OUT,
         )
 
+    def test_return_item_route_is_hyphenated(self):
+        # Matches this repo's multi-word-action convention (see
+        # SerializedItemViewSet's qr-code/qr-pdf actions) rather than DRF's
+        # default underscored method-name routing.
+        item = self._out_item()
+
+        response = self.client.post(
+            f"/api/work-orders/{self.work_order.id}/return-item/",
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
     def test_return_all_issued_items_marks_wo_returned(self):
         # AC-1/TC-01
         items = [self._out_item() for _ in range(2)]
@@ -1020,6 +1034,64 @@ class WorkOrderActiveListTests(APITestCase):
         row_line_item = response.data[0]["line_items"][0]
         self.assertEqual(row_line_item["still_out_quantity"], len(out_items))
         self.assertEqual(row_line_item["returned_quantity"], 1)
+
+    def test_still_out_count_treats_a_damaged_item_as_not_yet_returned(self):
+        # Regression: still_out_quantity must count anything but "available"
+        # (out/reserved/damaged/missing), not just STATUS_OUT - otherwise a
+        # damaged/missing item vanishes from the summary instead of
+        # counting as unaccounted-for.
+        work_order = WorkOrderFactory(
+            created_by=self.user, status=WorkOrder.STATUS_FULFILLED
+        )
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type, quantity=1
+        )
+        SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_DAMAGED,
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        row_line_item = response.data[0]["line_items"][0]
+        self.assertEqual(row_line_item["still_out_quantity"], 1)
+        self.assertEqual(row_line_item["returned_quantity"], 0)
+
+    def test_active_list_excludes_a_fully_returned_work_order(self):
+        # WRH-38: once return_item() closes a WO out, it shouldn't stay on
+        # the Active tab forever - "partially_returned" still needs
+        # attention, so only the fully "returned" status is excluded.
+        WorkOrderFactory(created_by=self.user, status=WorkOrder.STATUS_RETURNED)
+        still_active = WorkOrderFactory(
+            created_by=self.user, status=WorkOrder.STATUS_PARTIALLY_RETURNED
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        ids = [row["id"] for row in response.data]
+        self.assertEqual(ids, [still_active.id])
+
+    def test_active_list_excludes_a_fully_returned_supplementary(self):
+        # Same exclusion, one level deeper: a supplementary can
+        # independently reach STATUS_RETURNED and shouldn't keep nesting
+        # under its still-active primary once it does.
+        primary = WorkOrderFactory(created_by=self.user)
+        WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            status=WorkOrder.STATUS_RETURNED,
+        )
+        still_active_supplementary = WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            status=WorkOrder.STATUS_PARTIALLY_RETURNED,
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        supplementary_ids = [s["id"] for s in response.data[0]["supplementaries"]]
+        self.assertEqual(supplementary_ids, [still_active_supplementary.id])
 
     def test_active_list_excludes_supplementaries_from_the_top_level(self):
         primary = WorkOrderFactory(created_by=self.user)
