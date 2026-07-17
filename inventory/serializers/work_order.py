@@ -1,8 +1,12 @@
 from django.db import transaction
 from rest_framework import serializers
 
-from inventory.models import ProductType, WorkOrder, WorkOrderLineItem
-from inventory.models.work_order import SCANNED_COUNT_ANNOTATION
+from inventory.models import ProductType, SerializedItem, WorkOrder, WorkOrderLineItem
+from inventory.models.work_order import (
+    RETURNED_COUNT_ANNOTATION,
+    SCANNED_COUNT_ANNOTATION,
+    STILL_OUT_COUNT_ANNOTATION,
+)
 
 
 class WorkOrderLineItemSerializer(serializers.ModelSerializer):
@@ -122,3 +126,118 @@ class WorkOrderScanSerializer(serializers.Serializer):
             "required": "Serial number is required.",
         },
     )
+
+
+class WorkOrderActiveLineItemSerializer(serializers.ModelSerializer):
+    # WRH-55/AC-2: "per-type returned vs. still-out counts" - see
+    # RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's comment for why
+    # these differ from scanned_quantity/remaining_quantity.
+    product_type_name = serializers.CharField(
+        source="product_type.name", read_only=True
+    )
+    returned_quantity = serializers.SerializerMethodField()
+    still_out_quantity = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkOrderLineItem
+        fields = [
+            "id",
+            "product_type",
+            "product_type_name",
+            "quantity",
+            "returned_quantity",
+            "still_out_quantity",
+        ]
+
+    def get_returned_quantity(self, obj):
+        return getattr(obj, RETURNED_COUNT_ANNOTATION, 0)
+
+    def get_still_out_quantity(self, obj):
+        return getattr(obj, STILL_OUT_COUNT_ANNOTATION, 0)
+
+
+class WorkOrderActiveSupplementarySerializer(serializers.ModelSerializer):
+    # AC-1: a supplementary nested beneath its Primary - same per-WO summary
+    # shape as WorkOrderActiveSerializer below, minus its own
+    # "supplementaries" field (supplementaries are one level deep only -
+    # there's no path to create a supplementary-of-a-supplementary).
+    line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = WorkOrder
+        fields = [
+            "id",
+            "job_name",
+            "client_name",
+            "expected_date_out",
+            "status",
+            "line_items",
+        ]
+
+
+class WorkOrderActiveSerializer(serializers.ModelSerializer):
+    # WRH-55: the "Active Work Orders" list - Primary WOs (parent_work_order
+    # is null) with their supplementaries nested beneath (AC-1) and
+    # per-type returned/still-out summary counts (AC-2).
+    line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
+    supplementaries = WorkOrderActiveSupplementarySerializer(many=True, read_only=True)
+
+    class Meta:
+        model = WorkOrder
+        fields = [
+            "id",
+            "job_name",
+            "client_name",
+            "expected_date_out",
+            "status",
+            "line_items",
+            "supplementaries",
+        ]
+
+
+class WorkOrderDetailSerializedItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SerializedItem
+        fields = ["id", "serial_number", "status"]
+
+
+class WorkOrderDetailLineItemSerializer(serializers.ModelSerializer):
+    # WRH-55/AC-3: drill-down - the exact serials issued on this line item
+    # and their current statuses, not just aggregate counts.
+    product_type_name = serializers.CharField(
+        source="product_type.name", read_only=True
+    )
+    serialized_items = WorkOrderDetailSerializedItemSerializer(
+        many=True, read_only=True
+    )
+
+    class Meta:
+        model = WorkOrderLineItem
+        fields = [
+            "id",
+            "product_type",
+            "product_type_name",
+            "quantity",
+            "serialized_items",
+        ]
+
+
+class WorkOrderDetailSerializer(serializers.ModelSerializer):
+    line_items = WorkOrderDetailLineItemSerializer(many=True, read_only=True)
+    created_by_username = serializers.CharField(
+        source="created_by.username", read_only=True
+    )
+
+    class Meta:
+        model = WorkOrder
+        fields = [
+            "id",
+            "job_name",
+            "client_name",
+            "expected_date_out",
+            "status",
+            "created_by",
+            "created_by_username",
+            "parent_work_order",
+            "line_items",
+        ]

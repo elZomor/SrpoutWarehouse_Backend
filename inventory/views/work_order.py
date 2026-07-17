@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Count, Prefetch, prefetch_related_objects
+from django.db.models import Count, Prefetch, Q, prefetch_related_objects
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -7,8 +7,17 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from inventory.models import SerializedItem, WorkOrder, WorkOrderLineItem
-from inventory.models.work_order import SCANNED_COUNT_ANNOTATION
-from inventory.serializers import WorkOrderScanSerializer, WorkOrderSerializer
+from inventory.models.work_order import (
+    RETURNED_COUNT_ANNOTATION,
+    SCANNED_COUNT_ANNOTATION,
+    STILL_OUT_COUNT_ANNOTATION,
+)
+from inventory.serializers import (
+    WorkOrderActiveSerializer,
+    WorkOrderDetailSerializer,
+    WorkOrderScanSerializer,
+    WorkOrderSerializer,
+)
 
 
 def _line_items_queryset():
@@ -21,20 +30,88 @@ def _line_items_queryset():
     )
 
 
+def _active_line_items_queryset():
+    # WRH-55/AC-2: same one-query-per-list shape as _line_items_queryset(),
+    # but counting by SerializedItem.status instead of raw scan count - see
+    # RETURNED_COUNT_ANNOTATION's model-level comment for why "returned" is
+    # always 0 today.
+    return WorkOrderLineItem.objects.select_related("product_type").annotate(
+        **{
+            RETURNED_COUNT_ANNOTATION: Count(
+                "serialized_items",
+                filter=Q(serialized_items__status=SerializedItem.STATUS_AVAILABLE),
+            ),
+            STILL_OUT_COUNT_ANNOTATION: Count(
+                "serialized_items",
+                filter=Q(serialized_items__status=SerializedItem.STATUS_OUT),
+            ),
+        }
+    )
+
+
 class WorkOrderViewSet(
-    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
 ):
     # WRH-31 (US-011a) scopes create+list; WRH-54 (US-013a) adds the
-    # start/scan/complete actions below - field validation (WRH-32),
-    # supplementary creation (US-012a), and the active list view (US-014a)
-    # are separate stories, so retrieve/update/destroy stay unregistered.
+    # start/scan/complete actions below; WRH-55 (US-014a) adds retrieve
+    # (AC-3 drill-down) and the active action (AC-1/AC-2 list) below -
+    # field validation (WRH-32) and supplementary creation (US-012a, still
+    # no ticket/UI) are the remaining unscoped gaps, so update/destroy stay
+    # unregistered.
     permission_classes = [IsAuthenticated]
     queryset = WorkOrder.objects.select_related("created_by").prefetch_related(
         Prefetch("line_items", queryset=_line_items_queryset())
     )
     serializer_class = WorkOrderSerializer
 
+    def get_serializer_class(self):
+        if self.action == "active":
+            return WorkOrderActiveSerializer
+        if self.action == "retrieve":
+            return WorkOrderDetailSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
+        if self.action == "active":
+            # AC-1: Primary WOs only at the top level, each with its own
+            # supplementaries nested beneath (one level deep - see
+            # WorkOrderActiveSupplementarySerializer's comment).
+            return (
+                WorkOrder.objects.filter(parent_work_order__isnull=True)
+                .order_by("-expected_date_out", "-id")
+                .prefetch_related(
+                    Prefetch("line_items", queryset=_active_line_items_queryset()),
+                    Prefetch(
+                        "supplementaries",
+                        queryset=WorkOrder.objects.order_by(
+                            "-expected_date_out", "-id"
+                        ).prefetch_related(
+                            Prefetch(
+                                "line_items", queryset=_active_line_items_queryset()
+                            )
+                        ),
+                    ),
+                )
+            )
+        if self.action == "retrieve":
+            # AC-3: the exact serials issued on this WO and their current
+            # statuses - a different shape from the list actions' counts.
+            return WorkOrder.objects.select_related("created_by").prefetch_related(
+                Prefetch(
+                    "line_items",
+                    queryset=WorkOrderLineItem.objects.select_related(
+                        "product_type"
+                    ).prefetch_related(
+                        Prefetch(
+                            "serialized_items",
+                            queryset=SerializedItem.objects.order_by("serial_number"),
+                        )
+                    ),
+                )
+            )
         queryset = super().get_queryset()
         if self.action in ("scan", "complete"):
             # Both actions build their own fresh, request-scoped query for
@@ -43,6 +120,16 @@ class WorkOrderViewSet(
             # PurchaseOrderViewSet.get_queryset()'s identical reasoning.
             queryset = queryset.prefetch_related(None)
         return queryset
+
+    @action(detail=False, methods=["get"])
+    def active(self, request):
+        # AC-1/AC-2: nested Primary+supplementary list with per-type
+        # returned/still-out summary counts - get_queryset()/
+        # get_serializer_class() above do the actual shaping, this just
+        # reuses ListModelMixin's list() (pagination included) rather than
+        # duplicating it. AC-4 (empty state) needs nothing special here -
+        # an empty queryset already serializes to [].
+        return self.list(request)
 
     def perform_create(self, serializer):
         # AC-1: "the creating user is recorded" - taken from the
