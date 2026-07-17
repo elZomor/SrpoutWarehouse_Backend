@@ -145,6 +145,21 @@ class WorkOrderScanSerializer(serializers.Serializer):
     )
 
 
+class WorkOrderReturnScanSerializer(serializers.Serializer):
+    # Input-only (AC-1/AC-2/AC-4): one scanned serial per call against
+    # whichever line item it was originally issued against - matches
+    # WorkOrderScanSerializer's identical scan-gun-driven shape. Box-QR
+    # return (AC-3) needs a Box/Container model that doesn't exist in this
+    # repo yet (PRD Epic 5, unbuilt, same gap WRH-30/WRH-54 hit) - deferred
+    # to WRH-5 alongside them.
+    serial_number = serializers.CharField(
+        error_messages={
+            "blank": "Serial number is required.",
+            "required": "Serial number is required.",
+        },
+    )
+
+
 class WorkOrderActiveLineItemSerializer(serializers.ModelSerializer):
     # WRH-55/AC-2: "per-type returned vs. still-out counts" - see
     # RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's comment for why
@@ -210,6 +225,18 @@ class WorkOrderActiveSerializer(serializers.ModelSerializer):
             "line_items",
             "supplementaries",
         ]
+
+
+class WorkOrderReturnSerializer(serializers.ModelSerializer):
+    # AC-1/AC-2: "a summary is shown: Returned / Still missing" - reuses
+    # WorkOrderActiveLineItemSerializer's returned_quantity/
+    # still_out_quantity fields (WRH-55/AC-2), now populated for real once
+    # return_item() starts flipping items back to available.
+    line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = WorkOrder
+        fields = ["id", "job_name", "status", "line_items"]
 
 
 class WorkOrderDetailSerializedItemSerializer(serializers.ModelSerializer):

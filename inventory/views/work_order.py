@@ -15,8 +15,18 @@ from inventory.models.work_order import (
 from inventory.serializers import (
     WorkOrderActiveSerializer,
     WorkOrderDetailSerializer,
+    WorkOrderReturnScanSerializer,
+    WorkOrderReturnSerializer,
     WorkOrderScanSerializer,
     WorkOrderSerializer,
+)
+
+# WRH-38: a WO is eligible for return once it's fulfilled, or already
+# partially returned (AC-4: completing a partially_returned WO reuses the
+# same return_item action, no separate "reopen" step).
+RETURN_ELIGIBLE_STATUSES = (
+    WorkOrder.STATUS_FULFILLED,
+    WorkOrder.STATUS_PARTIALLY_RETURNED,
 )
 
 
@@ -133,7 +143,7 @@ class WorkOrderViewSet(
                 )
             )
         queryset = super().get_queryset()
-        if self.action in ("scan", "complete"):
+        if self.action in ("scan", "complete", "return_item"):
             # Both actions build their own fresh, request-scoped query for
             # their response (see below) and never read the prefetched
             # line_items from self.get_object() - matches
@@ -169,6 +179,20 @@ class WorkOrderViewSet(
             Prefetch(
                 "line_items",
                 queryset=_line_items_queryset().filter(work_order_id=work_order.id),
+            ),
+        )
+
+    def _refresh_active_line_items(self, work_order):
+        # Same reasoning as _refresh_line_items() above, but populated with
+        # the returned/still-out counts (AC-1/AC-2's "Returned / Still
+        # missing" summary) instead of scan progress.
+        prefetch_related_objects(
+            [work_order],
+            Prefetch(
+                "line_items",
+                queryset=_active_line_items_queryset().filter(
+                    work_order_id=work_order.id
+                ),
             ),
         )
 
@@ -331,3 +355,86 @@ class WorkOrderViewSet(
             self._refresh_line_items(work_order)
 
         return Response(WorkOrderSerializer(work_order).data, status=200)
+
+    @action(detail=True, methods=["post"])
+    def return_item(self, request, pk=None):
+        # AC-1/AC-2/AC-4: a scanned serial currently "out" against this WO
+        # flips back to "available"; once none remain out the WO moves to
+        # "returned", otherwise "partially_returned" - re-scanning a
+        # partially_returned WO's remaining items (AC-4) reuses this same
+        # action, no separate "reopen" step needed. Box-QR return (AC-3)
+        # needs a Box/Container model that doesn't exist yet - deferred to
+        # WRH-5 (see WorkOrderReturnScanSerializer's comment). Business-rule
+        # guards (item not issued on this WO's exact wording, already-
+        # available rejection wording, closed-WO guard) are WRH-39's scope
+        # per this ticket's own notes - only the minimal checks needed to
+        # compute a correct transition without corrupting another WO's
+        # items are included here.
+        work_order = self.get_object()
+        if work_order.status not in RETURN_ELIGIBLE_STATUSES:
+            raise ValidationError(
+                {"status": ["Work order is not eligible for return."]}
+            )
+
+        serializer = WorkOrderReturnScanSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serial_number = serializer.validated_data["serial_number"]
+
+        with transaction.atomic():
+            # Lock the parent WorkOrder row - same "lock the row whose
+            # invariant you're protecting" reasoning as scan()/complete()
+            # above, since the status this action re-checks and writes is a
+            # WO-level field.
+            work_order = WorkOrder.objects.select_for_update().get(pk=work_order.pk)
+            if work_order.status not in RETURN_ELIGIBLE_STATUSES:
+                raise ValidationError(
+                    {"status": ["Work order is not eligible for return."]}
+                )
+
+            try:
+                item = (
+                    SerializedItem.objects.select_for_update()
+                    .select_related("work_order_line_item")
+                    .get(serial_number=serial_number)
+                )
+            except SerializedItem.DoesNotExist:
+                raise ValidationError({"serial_number": ["Serial not found"]})
+
+            if (
+                item.work_order_line_item_id is None
+                or item.work_order_line_item.work_order_id != work_order.id
+            ):
+                raise ValidationError(
+                    {
+                        "serial_number": [
+                            f"{item.serial_number} was not issued on"
+                            f" WO-{work_order.id}"
+                        ]
+                    }
+                )
+            if item.status != SerializedItem.STATUS_OUT:
+                raise ValidationError(
+                    {
+                        "serial_number": [
+                            f"{item.serial_number} is not currently out on"
+                            " this work order"
+                        ]
+                    }
+                )
+
+            item.status = SerializedItem.STATUS_AVAILABLE
+            item.save(update_fields=["status"])
+
+            still_out = SerializedItem.objects.filter(
+                work_order_line_item__work_order_id=work_order.id,
+                status=SerializedItem.STATUS_OUT,
+            ).count()
+            work_order.status = (
+                WorkOrder.STATUS_RETURNED
+                if still_out == 0
+                else WorkOrder.STATUS_PARTIALLY_RETURNED
+            )
+            work_order.save(update_fields=["status"])
+            self._refresh_active_line_items(work_order)
+
+        return Response(WorkOrderReturnSerializer(work_order).data, status=200)

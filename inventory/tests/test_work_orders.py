@@ -785,6 +785,178 @@ class WorkOrderCompleteFulfillmentTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class WorkOrderReturnItemTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+        self.work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        self.line_item = WorkOrderLineItemFactory(
+            work_order=self.work_order,
+            product_type=self.product_type,
+            quantity=2,
+        )
+
+    def return_item(self, serial_number):
+        return self.client.post(
+            reverse("workorder-return-item", args=[self.work_order.id]),
+            {"serial_number": serial_number},
+            format="json",
+        )
+
+    def _out_item(self):
+        return SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+    def test_return_all_issued_items_marks_wo_returned(self):
+        # AC-1/TC-01
+        items = [self._out_item() for _ in range(2)]
+
+        self.return_item(items[0].serial_number)
+        response = self.return_item(items[1].serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        for item in items:
+            item.refresh_from_db()
+            self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+        line_item_data = response.data["line_items"][0]
+        self.assertEqual(line_item_data["returned_quantity"], 2)
+        self.assertEqual(line_item_data["still_out_quantity"], 0)
+
+    def test_partial_return_marks_wo_partially_returned(self):
+        # AC-2/TC-02
+        items = [self._out_item() for _ in range(2)]
+
+        response = self.return_item(items[0].serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_PARTIALLY_RETURNED)
+        items[0].refresh_from_db()
+        items[1].refresh_from_db()
+        self.assertEqual(items[0].status, SerializedItem.STATUS_AVAILABLE)
+        self.assertEqual(items[1].status, SerializedItem.STATUS_OUT)
+        line_item_data = response.data["line_items"][0]
+        self.assertEqual(line_item_data["returned_quantity"], 1)
+        self.assertEqual(line_item_data["still_out_quantity"], 1)
+
+    def test_completing_a_partially_returned_wo_reaches_returned(self):
+        # AC-4/TC-04
+        items = [self._out_item() for _ in range(2)]
+        self.return_item(items[0].serial_number)
+        self.work_order.refresh_from_db()
+        self.assertEqual(self.work_order.status, WorkOrder.STATUS_PARTIALLY_RETURNED)
+
+        response = self.return_item(items[1].serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+
+    def test_return_rejects_a_nonexistent_serial_number(self):
+        response = self.return_item("SN-DOES-NOT-EXIST")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["serial_number"], ["Serial not found"])
+
+    def test_return_rejects_an_item_not_currently_out(self):
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_AVAILABLE,
+        )
+
+        response = self.return_item(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("serial_number", response.data)
+
+    def test_return_rejects_an_item_issued_on_a_different_work_order(self):
+        other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        other_line_item = WorkOrderLineItemFactory(
+            work_order=other_work_order, product_type=self.product_type
+        )
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=other_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response = self.return_item(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("serial_number", response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+    def test_return_rejects_when_work_order_is_draft(self):
+        draft_work_order = WorkOrderFactory()
+        line_item = WorkOrderLineItemFactory(
+            work_order=draft_work_order, product_type=self.product_type
+        )
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response = self.client.post(
+            reverse("workorder-return-item", args=[draft_work_order.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_return_rejects_when_work_order_already_returned(self):
+        self.work_order.status = WorkOrder.STATUS_RETURNED
+        self.work_order.save(update_fields=["status"])
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response = self.return_item(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_return_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        item = self._out_item()
+
+        response = self.return_item(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_return_rechecks_work_order_status_after_the_lock_is_acquired(self):
+        # Simulates a concurrent second return() call landing in the window
+        # between the pre-lock status check and select_for_update() -
+        # matches WorkOrderScanTests's identical race-simulation technique.
+        original_select_for_update = WorkOrder.objects.select_for_update
+        work_order = self.work_order
+
+        def return_then_lock(*args, **kwargs):
+            work_order.status = WorkOrder.STATUS_RETURNED
+            work_order.save(update_fields=["status"])
+            return original_select_for_update(*args, **kwargs)
+
+        item = self._out_item()
+        with patch.object(WorkOrder.objects, "select_for_update", return_then_lock):
+            response = self.return_item(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+
 class WorkOrderActiveListTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(

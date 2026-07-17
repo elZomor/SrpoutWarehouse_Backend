@@ -12,9 +12,9 @@ SCANNED_COUNT_ANNOTATION = "scanned_count"
 # WRH-55/AC-2: "per-type returned vs. still-out counts" on the active-WOs
 # list - distinct from SCANNED_COUNT_ANNOTATION (fulfillment progress
 # against the requested quantity). still_out = claimed items confirmed out
-# (SerializedItem.STATUS_OUT); returned = the same items once a future
-# return flow (WRH-38, unbuilt) flips them back to STATUS_AVAILABLE - always
-# 0 until that ships, which is correct given no code path does that yet.
+# (SerializedItem.STATUS_OUT); returned = the same items once
+# WorkOrderViewSet.return_item() (WRH-38) flips them back to
+# STATUS_AVAILABLE.
 RETURNED_COUNT_ANNOTATION = "returned_count"
 STILL_OUT_COUNT_ANNOTATION = "still_out_count"
 
@@ -23,10 +23,17 @@ class WorkOrder(models.Model):
     STATUS_DRAFT = "draft"
     STATUS_IN_PROGRESS = "in_progress"
     STATUS_FULFILLED = "fulfilled"
+    # WRH-38/AC-1/AC-2: a fulfilled WO moves to "returned" once every issued
+    # serial is back, or "partially_returned" if some remain out -
+    # WorkOrderViewSet.return_item() is the only path that sets either.
+    STATUS_RETURNED = "returned"
+    STATUS_PARTIALLY_RETURNED = "partially_returned"
     STATUS_CHOICES = [
         (STATUS_DRAFT, "Draft"),
         (STATUS_IN_PROGRESS, "In progress"),
         (STATUS_FULFILLED, "Fulfilled"),
+        (STATUS_RETURNED, "Returned"),
+        (STATUS_PARTIALLY_RETURNED, "Partially returned"),
     ]
 
     job_name = models.CharField(max_length=255)
