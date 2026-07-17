@@ -262,6 +262,46 @@ class WorkOrderTests(APITestCase):
         )
         self.assertEqual(WorkOrder.objects.count(), 0)
 
+    def test_create_work_order_rejects_null_product_type_on_line_item(self):
+        # WRH-32/AC-5: explicit null must match the same spec'd message as
+        # an omitted key, not DRF's generic "may not be null" default.
+        response = self.client.post(
+            reverse("workorder-list"),
+            {
+                "job_name": "Summer Gala",
+                "expected_date_out": "2026-08-01",
+                "line_items": [{"product_type": None, "quantity": 5}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(response.data["line_items"][0]["product_type"][0]),
+            "Product type is required.",
+        )
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
+    def test_create_work_order_rejects_missing_quantity_on_line_item(self):
+        # WRH-32/AC-4: an omitted quantity key must match the same spec'd
+        # message as an out-of-range value, not DRF's generic default.
+        response = self.client.post(
+            reverse("workorder-list"),
+            {
+                "job_name": "Summer Gala",
+                "expected_date_out": "2026-08-01",
+                "line_items": [{"product_type": self.product_type.id}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(response.data["line_items"][0]["quantity"][0]),
+            "Quantity must be greater than zero.",
+        )
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
     def test_status_cannot_be_overridden_on_create(self):
         # status is a read_only field - AC-1 guarantees every new WO is
         # "draft" regardless of what the client sends.

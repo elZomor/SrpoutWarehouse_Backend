@@ -17,17 +17,9 @@ class WorkOrderLineItemSerializer(serializers.ModelSerializer):
         queryset=ProductType.objects.filter(archived=False),
         error_messages={
             "required": "Product type is required.",
+            "null": "Product type is required.",
             "does_not_exist": "Select a product type that exists and is not archived.",
         },
-    )
-    # WRH-32/AC-4: the model's PositiveIntegerField alone would still accept
-    # 0 (Django's positive-integer validator floors at 0, not 1) - min_value
-    # here is what actually rejects zero/negative quantities, matching
-    # validate_line_items()'s pattern of enforcing business rules at the
-    # serializer layer rather than the model.
-    quantity = serializers.IntegerField(
-        min_value=1,
-        error_messages={"min_value": "Quantity must be greater than zero."},
     )
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True
@@ -45,6 +37,21 @@ class WorkOrderLineItemSerializer(serializers.ModelSerializer):
             "scanned_quantity",
             "remaining_quantity",
         ]
+        # WRH-32/AC-4: the model's PositiveIntegerField alone would still
+        # accept 0 (Django's positive-integer validator floors at 0, not 1)
+        # - min_value here is what actually rejects zero/negative
+        # quantities, matching PurchaseOrderLineItemSerializer.
+        # expected_quantity's identical extra_kwargs pattern for adding
+        # validation to a model-derived field.
+        extra_kwargs = {
+            "quantity": {
+                "min_value": 1,
+                "error_messages": {
+                    "required": "Quantity must be greater than zero.",
+                    "min_value": "Quantity must be greater than zero.",
+                },
+            },
+        }
 
     def get_scanned_quantity(self, obj):
         # AC-2: "a live counter updates per line item, e.g. 23/50 scanned" -
