@@ -16,8 +16,18 @@ class WorkOrderLineItemSerializer(serializers.ModelSerializer):
     product_type = serializers.PrimaryKeyRelatedField(
         queryset=ProductType.objects.filter(archived=False),
         error_messages={
-            "does_not_exist": "Select a product type that exists and is not archived."
+            "required": "Product type is required.",
+            "does_not_exist": "Select a product type that exists and is not archived.",
         },
+    )
+    # WRH-32/AC-4: the model's PositiveIntegerField alone would still accept
+    # 0 (Django's positive-integer validator floors at 0, not 1) - min_value
+    # here is what actually rejects zero/negative quantities, matching
+    # validate_line_items()'s pattern of enforcing business rules at the
+    # serializer layer rather than the model.
+    quantity = serializers.IntegerField(
+        min_value=1,
+        error_messages={"min_value": "Quantity must be greater than zero."},
     )
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True

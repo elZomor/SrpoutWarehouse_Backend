@@ -205,6 +205,63 @@ class WorkOrderTests(APITestCase):
         self.assertIn("line_items", response.data)
         self.assertEqual(WorkOrder.objects.count(), 0)
 
+    def test_create_work_order_rejects_zero_quantity_line_item(self):
+        # WRH-32/AC-4/TC-04: zero isn't a positive quantity.
+        response = self.client.post(
+            reverse("workorder-list"),
+            {
+                "job_name": "Summer Gala",
+                "expected_date_out": "2026-08-01",
+                "line_items": [{"product_type": self.product_type.id, "quantity": 0}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(response.data["line_items"][0]["quantity"][0]),
+            "Quantity must be greater than zero.",
+        )
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
+    def test_create_work_order_rejects_negative_quantity_line_item(self):
+        # WRH-32/AC-4/TC-05 (boundary).
+        response = self.client.post(
+            reverse("workorder-list"),
+            {
+                "job_name": "Summer Gala",
+                "expected_date_out": "2026-08-01",
+                "line_items": [{"product_type": self.product_type.id, "quantity": -5}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(response.data["line_items"][0]["quantity"][0]),
+            "Quantity must be greater than zero.",
+        )
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
+    def test_create_work_order_rejects_missing_product_type_on_line_item(self):
+        # WRH-32/AC-5/TC-06.
+        response = self.client.post(
+            reverse("workorder-list"),
+            {
+                "job_name": "Summer Gala",
+                "expected_date_out": "2026-08-01",
+                "line_items": [{"quantity": 5}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(response.data["line_items"][0]["product_type"][0]),
+            "Product type is required.",
+        )
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
     def test_status_cannot_be_overridden_on_create(self):
         # status is a read_only field - AC-1 guarantees every new WO is
         # "draft" regardless of what the client sends.
