@@ -11,6 +11,8 @@ from inventory.serializers.work_order import (
     WorkOrderActiveSerializer,
     WorkOrderDetailSerializer,
     WorkOrderLineItemSerializer,
+    WorkOrderReturnScanSerializer,
+    WorkOrderReturnSerializer,
     WorkOrderScanSerializer,
     WorkOrderSerializer,
 )
@@ -27,6 +29,8 @@ __all__ = [
     "WorkOrderActiveSerializer",
     "WorkOrderDetailSerializer",
     "WorkOrderLineItemSerializer",
+    "WorkOrderReturnScanSerializer",
+    "WorkOrderReturnSerializer",
     "WorkOrderScanSerializer",
     "WorkOrderSerializer",
 ]
