@@ -20,6 +20,26 @@ from inventory.serializers import (
 )
 
 
+def _unavailable_item_message(item):
+    # WRH-33/AC-1/AC-3: scan() rejects a non-available item with a reason
+    # specific to *why* - "out"/"reserved" name the WO holding it (still
+    # readable off work_order_line_item, which nothing clears once set -
+    # see SerializedItem.work_order_line_item's own comment), "damaged"/
+    # "missing" name the item's own condition. The bare fallback only
+    # covers a status this function doesn't otherwise know about.
+    if item.status == SerializedItem.STATUS_OUT and item.work_order_line_item_id:
+        wo_id = item.work_order_line_item.work_order_id
+        return f"{item.serial_number} is currently out on WO-{wo_id}"
+    if item.status == SerializedItem.STATUS_RESERVED and item.work_order_line_item_id:
+        wo_id = item.work_order_line_item.work_order_id
+        return f"{item.serial_number} is already reserved on WO-{wo_id}"
+    if item.status == SerializedItem.STATUS_DAMAGED:
+        return f"{item.serial_number} is damaged and cannot be issued"
+    if item.status == SerializedItem.STATUS_MISSING:
+        return f"{item.serial_number} is missing and cannot be issued"
+    return f"{item.serial_number} is not available to scan"
+
+
 def _line_items_queryset():
     # Folds each line item's scanned count into the same query (one
     # COUNT-per-WO-list, not one per line item) - WorkOrderLineItemSerializer
@@ -243,9 +263,8 @@ class WorkOrderViewSet(
                     serial_number=serial_number
                 )
             except SerializedItem.DoesNotExist:
-                raise ValidationError(
-                    {"serial_number": ["No item found with this serial number."]}
-                )
+                # AC-4: exact text the fulfillment UI shows verbatim.
+                raise ValidationError({"serial_number": ["Serial not found"]})
             if item.product_type_id != line_item.product_type_id:
                 raise ValidationError(
                     {
@@ -256,7 +275,7 @@ class WorkOrderViewSet(
                 )
             if item.status != SerializedItem.STATUS_AVAILABLE:
                 raise ValidationError(
-                    {"serial_number": ["Item is not available to scan."]}
+                    {"serial_number": [_unavailable_item_message(item)]}
                 )
 
             item.status = SerializedItem.STATUS_RESERVED
