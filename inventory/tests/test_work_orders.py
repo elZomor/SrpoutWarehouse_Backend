@@ -261,9 +261,9 @@ class WorkOrderTests(APITestCase):
         self.assertEqual(listed["job_name"], "Summer Gala")
         self.assertEqual(len(listed["line_items"]), 1)
 
-    def test_retrieve_update_destroy_routes_are_not_registered(self):
-        # WRH-31 only scopes create+list - retrieve/update/destroy are
-        # separate, unscoped stories, so no detail route exists at all yet.
+    def test_update_destroy_routes_are_not_registered(self):
+        # WRH-55 adds retrieve (AC-3) but update/destroy remain separate,
+        # unscoped stories - PUT/DELETE on the detail route still 405.
         response = self.client.post(
             reverse("workorder-list"),
             {
@@ -275,8 +275,14 @@ class WorkOrderTests(APITestCase):
         )
         detail_url = f"/api/work-orders/{response.data['id']}/"
 
+        self.assertEqual(self.client.get(detail_url).status_code, status.HTTP_200_OK)
         self.assertEqual(
-            self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            self.client.put(detail_url, {}, format="json").status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+        self.assertEqual(
+            self.client.delete(detail_url).status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
 
     def test_create_work_order_requires_authentication(self):
@@ -601,5 +607,129 @@ class WorkOrderCompleteFulfillmentTests(APITestCase):
         self.client.force_authenticate(user=None)
 
         response = self.complete()
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WorkOrderActiveListTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+
+    def test_active_list_is_empty_when_no_work_orders_exist(self):
+        # TC-04/AC-4: empty state, not an error.
+        response = self.client.get(reverse("workorder-active"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_active_list_nests_supplementaries_beneath_their_primary(self):
+        # TC-01/AC-1: Primary + 2 supplementaries - supplementaries nested
+        # beneath their Primary, not returned as their own top-level rows.
+        primary = WorkOrderFactory(created_by=self.user, job_name="Primary Job")
+        supplementary_1 = WorkOrderFactory(
+            created_by=self.user, job_name="Supp 1", parent_work_order=primary
+        )
+        supplementary_2 = WorkOrderFactory(
+            created_by=self.user, job_name="Supp 2", parent_work_order=primary
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["id"], primary.id)
+        supplementary_ids = {s["id"] for s in response.data[0]["supplementaries"]}
+        self.assertEqual(supplementary_ids, {supplementary_1.id, supplementary_2.id})
+
+    def test_active_list_reports_per_type_returned_vs_still_out_counts(self):
+        # TC-02/AC-2: each product type on the row shows returned/still-out
+        # counts, derived from SerializedItem.status (not scan progress).
+        work_order = WorkOrderFactory(
+            created_by=self.user, status=WorkOrder.STATUS_FULFILLED
+        )
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type, quantity=3
+        )
+        out_items = [
+            SerializedItemFactory(
+                product_type=self.product_type,
+                work_order_line_item=line_item,
+                status=SerializedItem.STATUS_OUT,
+            )
+            for _ in range(2)
+        ]
+        SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_AVAILABLE,
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row_line_item = response.data[0]["line_items"][0]
+        self.assertEqual(row_line_item["still_out_quantity"], len(out_items))
+        self.assertEqual(row_line_item["returned_quantity"], 1)
+
+    def test_active_list_excludes_supplementaries_from_the_top_level(self):
+        primary = WorkOrderFactory(created_by=self.user)
+        WorkOrderFactory(created_by=self.user, parent_work_order=primary)
+
+        response = self.client.get(reverse("workorder-active"))
+
+        self.assertEqual(len(response.data), 1)
+
+    def test_active_list_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse("workorder-active"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WorkOrderDetailTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+
+    def test_retrieve_lists_exact_serials_and_their_statuses(self):
+        # TC-03/AC-3: drill into a WO for the exact serials issued and
+        # their current statuses, not just aggregate counts.
+        work_order = WorkOrderFactory(created_by=self.user)
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type, quantity=2
+        )
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_RESERVED,
+        )
+
+        response = self.client.get(reverse("workorder-detail", args=[work_order.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response_line_item = response.data["line_items"][0]
+        self.assertEqual(len(response_line_item["serialized_items"]), 1)
+        self.assertEqual(
+            response_line_item["serialized_items"][0]["serial_number"],
+            item.serial_number,
+        )
+        self.assertEqual(
+            response_line_item["serialized_items"][0]["status"],
+            SerializedItem.STATUS_RESERVED,
+        )
+
+    def test_retrieve_requires_authentication(self):
+        work_order = WorkOrderFactory(created_by=self.user)
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse("workorder-detail", args=[work_order.id]))
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
