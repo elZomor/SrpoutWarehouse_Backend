@@ -63,8 +63,8 @@ def _line_items_queryset():
 def _active_line_items_queryset():
     # WRH-55/AC-2: same one-query-per-list shape as _line_items_queryset(),
     # but counting by SerializedItem.status instead of raw scan count - see
-    # RETURNED_COUNT_ANNOTATION's model-level comment for why "returned" is
-    # always 0 today.
+    # RETURNED_COUNT_ANNOTATION's model-level comment for why still_out
+    # excludes AVAILABLE rather than only counting STATUS_OUT.
     return WorkOrderLineItem.objects.select_related("product_type").annotate(
         **{
             RETURNED_COUNT_ANNOTATION: Count(
@@ -73,7 +73,7 @@ def _active_line_items_queryset():
             ),
             STILL_OUT_COUNT_ANNOTATION: Count(
                 "serialized_items",
-                filter=Q(serialized_items__status=SerializedItem.STATUS_OUT),
+                filter=~Q(serialized_items__status=SerializedItem.STATUS_AVAILABLE),
             ),
         }
     )
@@ -108,9 +108,13 @@ class WorkOrderViewSet(
         if self.action == "active":
             # AC-1: Primary WOs only at the top level, each with its own
             # supplementaries nested beneath (one level deep - see
-            # WorkOrderActiveSupplementarySerializer's comment).
+            # WorkOrderActiveSupplementarySerializer's comment). WRH-38:
+            # a fully "returned" WO is done - excluded so it doesn't stay
+            # on this list forever once return_item() closes it out.
+            # "partially_returned" still needs attention, so it stays.
             return (
                 WorkOrder.objects.filter(parent_work_order__isnull=True)
+                .exclude(status=WorkOrder.STATUS_RETURNED)
                 .order_by("-expected_date_out", "-id")
                 .prefetch_related(
                     Prefetch("line_items", queryset=_active_line_items_queryset()),
@@ -167,32 +171,22 @@ class WorkOrderViewSet(
         # read_only on the serializer).
         serializer.save(created_by=self.request.user)
 
-    def _refresh_line_items(self, work_order):
+    def _refresh_line_items(self, work_order, queryset_builder=_line_items_queryset):
         # work_order was fetched with no prefetch at all (see
         # get_queryset() above), so this is the one place its line_items
         # relation gets populated - prefetch_related_objects (Django's
         # public API for this) runs a single fresh query and caches the
         # result, which the response serializer then reads with no further
         # query. Matches PurchaseOrderViewSet.receive()'s identical pattern.
+        # queryset_builder defaults to the scan-progress shape (start/scan/
+        # complete's responses); return_item() passes
+        # _active_line_items_queryset for the returned/still-out shape
+        # instead (AC-1/AC-2's "Returned / Still missing" summary).
         prefetch_related_objects(
             [work_order],
             Prefetch(
                 "line_items",
-                queryset=_line_items_queryset().filter(work_order_id=work_order.id),
-            ),
-        )
-
-    def _refresh_active_line_items(self, work_order):
-        # Same reasoning as _refresh_line_items() above, but populated with
-        # the returned/still-out counts (AC-1/AC-2's "Returned / Still
-        # missing" summary) instead of scan progress.
-        prefetch_related_objects(
-            [work_order],
-            Prefetch(
-                "line_items",
-                queryset=_active_line_items_queryset().filter(
-                    work_order_id=work_order.id
-                ),
+                queryset=queryset_builder().filter(work_order_id=work_order.id),
             ),
         )
 
@@ -356,7 +350,7 @@ class WorkOrderViewSet(
 
         return Response(WorkOrderSerializer(work_order).data, status=200)
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], url_path="return-item")
     def return_item(self, request, pk=None):
         # AC-1/AC-2/AC-4: a scanned serial currently "out" against this WO
         # flips back to "available"; once none remain out the WO moves to
@@ -364,12 +358,15 @@ class WorkOrderViewSet(
         # partially_returned WO's remaining items (AC-4) reuses this same
         # action, no separate "reopen" step needed. Box-QR return (AC-3)
         # needs a Box/Container model that doesn't exist yet - deferred to
-        # WRH-5 (see WorkOrderReturnScanSerializer's comment). Business-rule
-        # guards (item not issued on this WO's exact wording, already-
-        # available rejection wording, closed-WO guard) are WRH-39's scope
-        # per this ticket's own notes - only the minimal checks needed to
-        # compute a correct transition without corrupting another WO's
-        # items are included here.
+        # WRH-5 (see WorkOrderReturnScanSerializer's comment). WRH-39's
+        # remaining scope beyond what's already enforced below (the draft/
+        # in_progress/already-returned guard here, and the not-issued/not-
+        # out checks below) is refining exact message wording and the
+        # damaged-item-during-return case (its AC-6).
+        #
+        # url_path is explicit (matches serialized_item.py's qr-code/qr-pdf
+        # actions) since DRF's default would otherwise route this to
+        # /return_item/ instead of this repo's hyphenated convention.
         work_order = self.get_object()
         if work_order.status not in RETURN_ELIGIBLE_STATUSES:
             raise ValidationError(
@@ -422,19 +419,40 @@ class WorkOrderViewSet(
                     }
                 )
 
+            # Doesn't clear work_order_line_item - matches this repo's
+            # existing "current claim only, no history" design for this FK
+            # (see SerializedItem.work_order_line_item's own comment and
+            # _unavailable_item_message's identical reasoning). A later
+            # scan() onto a different WO will reassign it there, which can
+            # move this (by-then-closed) WO's own returned/still-out counts
+            # after the fact - an accepted limitation of not having a
+            # separate history/audit table, not something return_item
+            # introduces on its own.
             item.status = SerializedItem.STATUS_AVAILABLE
             item.save(update_fields=["status"])
 
-            still_out = SerializedItem.objects.filter(
-                work_order_line_item__work_order_id=work_order.id,
-                status=SerializedItem.STATUS_OUT,
-            ).count()
+            # Matches RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's
+            # definition (still out = anything but available) so a
+            # damaged/missing item doesn't silently vanish from this count
+            # instead of keeping the WO at partially_returned. Safe as a
+            # plain unlocked .count() only because the parent WorkOrder row
+            # is already locked above - every status-mutating action on
+            # this WO (start/scan/complete/return_item) takes that same
+            # lock first, so concurrent writers against this WO's items are
+            # already serialized by the time this line runs.
+            still_out = (
+                SerializedItem.objects.filter(
+                    work_order_line_item__work_order_id=work_order.id
+                )
+                .exclude(status=SerializedItem.STATUS_AVAILABLE)
+                .count()
+            )
             work_order.status = (
                 WorkOrder.STATUS_RETURNED
                 if still_out == 0
                 else WorkOrder.STATUS_PARTIALLY_RETURNED
             )
             work_order.save(update_fields=["status"])
-            self._refresh_active_line_items(work_order)
+            self._refresh_line_items(work_order, _active_line_items_queryset)
 
         return Response(WorkOrderReturnSerializer(work_order).data, status=200)
