@@ -733,5 +733,3 @@ class WorkOrderDetailTests(APITestCase):
         response = self.client.get(reverse("workorder-detail", args=[work_order.id]))
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
