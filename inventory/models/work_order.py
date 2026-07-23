@@ -13,11 +13,14 @@ SCANNED_COUNT_ANNOTATION = "scanned_count"
 # list - distinct from SCANNED_COUNT_ANNOTATION (fulfillment progress
 # against the requested quantity). returned = items WorkOrderViewSet.
 # return_item() (WRH-38) has flipped back to STATUS_AVAILABLE; still_out =
-# every other status an issued item can be in (out/reserved/damaged/
-# missing) - not just STATUS_OUT - so the two counts always sum to the line
-# item's quantity instead of a damaged/missing item silently vanishing from
-# the summary.
+# every other status an issued item can be in (out/reserved/missing) - not
+# just STATUS_OUT - so the three counts (returned/damaged/still_out) always
+# sum to the line item's quantity. WRH-57/AC-3: STATUS_DAMAGED gets its own
+# DAMAGED_COUNT_ANNOTATION and is excluded from STILL_OUT_COUNT_ANNOTATION -
+# a damaged return is its own outcome, neither "returned to available stock"
+# nor "still missing".
 RETURNED_COUNT_ANNOTATION = "returned_count"
+DAMAGED_COUNT_ANNOTATION = "damaged_count"
 STILL_OUT_COUNT_ANNOTATION = "still_out_count"
 
 

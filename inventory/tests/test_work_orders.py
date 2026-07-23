@@ -799,10 +799,13 @@ class WorkOrderReturnItemTests(APITestCase):
             quantity=2,
         )
 
-    def return_item(self, serial_number):
+    def return_item(self, serial_number, damaged=False):
+        payload = {"serial_number": serial_number}
+        if damaged:
+            payload["damaged"] = True
         return self.client.post(
             reverse("workorder-return-item", args=[self.work_order.id]),
-            {"serial_number": serial_number},
+            payload,
             format="json",
         )
 
@@ -904,7 +907,76 @@ class WorkOrderReturnItemTests(APITestCase):
         self.assertEqual(item.status, SerializedItem.STATUS_DAMAGED)
         self.assertEqual(Transaction.objects.filter(serialized_item=item).count(), 0)
         line_item_data = response.data["line_items"][0]
-        self.assertEqual(line_item_data["still_out_quantity"], 1)
+        self.assertEqual(line_item_data["damaged_quantity"], 1)
+        self.assertEqual(line_item_data["still_out_quantity"], 0)
+
+    def test_return_marks_a_returning_unit_as_damaged(self):
+        # AC-1/TC-01: marking a returning unit as damaged flips it to
+        # "damaged" (not "available"), links it to the returning WO, and
+        # doesn't add it back to available stock.
+        item = self._out_item()
+
+        response = self.return_item(item.serial_number, damaged=True)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_DAMAGED)
+        self.assertEqual(item.work_order_line_item_id, self.line_item.id)
+        transaction = Transaction.objects.get(serialized_item=item)
+        self.assertEqual(transaction.transaction_type, Transaction.TYPE_DAMAGED)
+        self.assertEqual(transaction.work_order_id, self.work_order.id)
+
+    def test_return_summary_separates_returned_damaged_and_still_missing(self):
+        # AC-2/TC-02: a return session with returned, damaged, and still-out
+        # items reports each as its own count.
+        line_item = WorkOrderLineItemFactory(
+            work_order=self.work_order, product_type=self.product_type, quantity=20
+        )
+        returned_items = [
+            SerializedItemFactory(
+                product_type=self.product_type,
+                work_order_line_item=line_item,
+                status=SerializedItem.STATUS_OUT,
+            )
+            for _ in range(15)
+        ]
+        damaged_item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+        for _ in range(4):
+            SerializedItemFactory(
+                product_type=self.product_type,
+                work_order_line_item=line_item,
+                status=SerializedItem.STATUS_OUT,
+            )
+
+        for item in returned_items:
+            self.return_item(item.serial_number)
+        response = self.return_item(damaged_item.serial_number, damaged=True)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line_item_data = next(
+            row for row in response.data["line_items"] if row["id"] == line_item.id
+        )
+        self.assertEqual(line_item_data["returned_quantity"], 15)
+        self.assertEqual(line_item_data["damaged_quantity"], 1)
+        self.assertEqual(line_item_data["still_out_quantity"], 4)
+
+    def test_wo_reaches_returned_status_when_remaining_item_is_marked_damaged(self):
+        # AC-3/TC-03: a damaged item is excluded from both "still missing"
+        # and "returned to available stock" - once every other item is
+        # accounted for, the WO still reaches "returned".
+        items = [self._out_item() for _ in range(2)]
+        self.return_item(items[0].serial_number)
+
+        response = self.return_item(items[1].serial_number, damaged=True)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        items[1].refresh_from_db()
+        self.assertEqual(items[1].status, SerializedItem.STATUS_DAMAGED)
 
     def test_return_rejects_an_item_issued_on_a_different_work_order(self):
         other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
@@ -1051,12 +1123,36 @@ class WorkOrderActiveListTests(APITestCase):
         row_line_item = response.data[0]["line_items"][0]
         self.assertEqual(row_line_item["still_out_quantity"], len(out_items))
         self.assertEqual(row_line_item["returned_quantity"], 1)
+        self.assertEqual(row_line_item["damaged_quantity"], 0)
 
-    def test_still_out_count_treats_a_damaged_item_as_not_yet_returned(self):
+    def test_still_out_count_treats_a_missing_item_as_not_yet_returned(self):
         # Regression: still_out_quantity must count anything but "available"
-        # (out/reserved/damaged/missing), not just STATUS_OUT - otherwise a
-        # damaged/missing item vanishes from the summary instead of
+        # or "damaged" (out/reserved/missing), not just STATUS_OUT -
+        # otherwise a missing item vanishes from the summary instead of
         # counting as unaccounted-for.
+        work_order = WorkOrderFactory(
+            created_by=self.user, status=WorkOrder.STATUS_FULFILLED
+        )
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type, quantity=1
+        )
+        SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_MISSING,
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        row_line_item = response.data[0]["line_items"][0]
+        self.assertEqual(row_line_item["still_out_quantity"], 1)
+        self.assertEqual(row_line_item["returned_quantity"], 0)
+        self.assertEqual(row_line_item["damaged_quantity"], 0)
+
+    def test_damaged_item_has_its_own_category_excluded_from_still_out(self):
+        # WRH-57/AC-3: a damaged item counts neither as "still missing" nor
+        # as "returned to available stock" - it has its own damaged_quantity
+        # category.
         work_order = WorkOrderFactory(
             created_by=self.user, status=WorkOrder.STATUS_FULFILLED
         )
@@ -1072,7 +1168,8 @@ class WorkOrderActiveListTests(APITestCase):
         response = self.client.get(reverse("workorder-active"))
 
         row_line_item = response.data[0]["line_items"][0]
-        self.assertEqual(row_line_item["still_out_quantity"], 1)
+        self.assertEqual(row_line_item["damaged_quantity"], 1)
+        self.assertEqual(row_line_item["still_out_quantity"], 0)
         self.assertEqual(row_line_item["returned_quantity"], 0)
 
     def test_active_list_excludes_a_fully_returned_work_order(self):

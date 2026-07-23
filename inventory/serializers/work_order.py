@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from inventory.models import ProductType, SerializedItem, WorkOrder, WorkOrderLineItem
 from inventory.models.work_order import (
+    DAMAGED_COUNT_ANNOTATION,
     RETURNED_COUNT_ANNOTATION,
     SCANNED_COUNT_ANNOTATION,
     STILL_OUT_COUNT_ANNOTATION,
@@ -149,25 +150,31 @@ class WorkOrderReturnScanSerializer(serializers.Serializer):
     # Input-only (AC-1/AC-2/AC-4): one scanned serial per call against
     # whichever line item it was originally issued against - matches
     # WorkOrderScanSerializer's identical scan-gun-driven shape. Box-QR
-    # return (AC-3) needs a Box/Container model that doesn't exist in this
-    # repo yet (PRD Epic 5, unbuilt, same gap WRH-30/WRH-54 hit) - deferred
-    # to WRH-5 alongside them.
+    # return (AC-3 of WRH-38) needs a Box/Container model that doesn't exist
+    # in this repo yet (PRD Epic 5, unbuilt, same gap WRH-30/WRH-54 hit) -
+    # deferred to WRH-5 alongside them.
     serial_number = serializers.CharField(
         error_messages={
             "blank": "Serial number is required.",
             "required": "Serial number is required.",
         },
     )
+    # WRH-57/AC-1: optional - defaults False so existing plain-return callers
+    # (and WRH-38/WRH-39's own tests) are unaffected; True flags this unit
+    # damaged instead of returning it to available stock.
+    damaged = serializers.BooleanField(required=False, default=False)
 
 
 class WorkOrderActiveLineItemSerializer(serializers.ModelSerializer):
-    # WRH-55/AC-2: "per-type returned vs. still-out counts" - see
-    # RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's comment for why
-    # these differ from scanned_quantity/remaining_quantity.
+    # WRH-55/AC-2 (returned/still_out), WRH-57/AC-2/AC-3 (damaged) - "per-
+    # type returned vs. damaged vs. still-out counts" - see
+    # RETURNED_COUNT_ANNOTATION's model-level comment for why these differ
+    # from scanned_quantity/remaining_quantity.
     product_type_name = serializers.CharField(
         source="product_type.name", read_only=True
     )
     returned_quantity = serializers.SerializerMethodField()
+    damaged_quantity = serializers.SerializerMethodField()
     still_out_quantity = serializers.SerializerMethodField()
 
     class Meta:
@@ -178,11 +185,15 @@ class WorkOrderActiveLineItemSerializer(serializers.ModelSerializer):
             "product_type_name",
             "quantity",
             "returned_quantity",
+            "damaged_quantity",
             "still_out_quantity",
         ]
 
     def get_returned_quantity(self, obj):
         return getattr(obj, RETURNED_COUNT_ANNOTATION, 0)
+
+    def get_damaged_quantity(self, obj):
+        return getattr(obj, DAMAGED_COUNT_ANNOTATION, 0)
 
     def get_still_out_quantity(self, obj):
         return getattr(obj, STILL_OUT_COUNT_ANNOTATION, 0)
@@ -228,10 +239,12 @@ class WorkOrderActiveSerializer(serializers.ModelSerializer):
 
 
 class WorkOrderReturnSerializer(serializers.ModelSerializer):
-    # AC-1/AC-2: "a summary is shown: Returned / Still missing" - reuses
-    # WorkOrderActiveLineItemSerializer's returned_quantity/
-    # still_out_quantity fields (WRH-55/AC-2), now populated for real once
-    # return_item() starts flipping items back to available.
+    # WRH-38/AC-1/AC-2: "a summary is shown: Returned / Still missing";
+    # WRH-57/AC-2: the summary "clearly separates Returned / Damaged / Still
+    # missing" - reuses WorkOrderActiveLineItemSerializer's
+    # returned_quantity/damaged_quantity/still_out_quantity fields
+    # (WRH-55/AC-2, WRH-57/AC-2), populated for real once return_item()
+    # starts flipping items back to available or damaged.
     line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
 
     class Meta:
