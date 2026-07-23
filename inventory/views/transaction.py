@@ -45,6 +45,11 @@ class TransactionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     # direct create endpoint, and per PRD notes the immutability rule
     # (no edit/delete) is its own dedicated story (US-024b) - so this
     # viewset deliberately exposes list only.
+    # WRH-50/AC-1,AC-2,AC-3: no create/update/partial_update/destroy mixin
+    # is ever added here - DRF's router only registers a detail route for
+    # actions the viewset implements, so /transactions/<pk>/ has no PUT,
+    # PATCH, or DELETE route at all (404, not 405). That's the append-only
+    # enforcement AC-3 asks for at the data layer, not just a hidden button.
     permission_classes = [IsAuthenticated]
     queryset = Transaction.objects.select_related(
         "serialized_item__product_type", "work_order", "user"
