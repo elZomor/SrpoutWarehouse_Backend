@@ -386,11 +386,9 @@ class WorkOrderViewSet(
         # partially_returned WO's remaining items (AC-4) reuses this same
         # action, no separate "reopen" step needed. Box-QR return (AC-3)
         # needs a Box/Container model that doesn't exist yet - deferred to
-        # WRH-5 (see WorkOrderReturnScanSerializer's comment). WRH-39's
-        # remaining scope beyond what's already enforced below (the draft/
-        # in_progress/already-returned guard here, and the not-issued/not-
-        # out checks below) is refining exact message wording and the
-        # damaged-item-during-return case (its AC-6).
+        # WRH-5 (see WorkOrderReturnScanSerializer's comment). WRH-39/AC-6:
+        # an item already flagged damaged is reflected as-is (see the
+        # STATUS_DAMAGED branch below) rather than rejected outright.
         #
         # url_path is explicit (matches serialized_item.py's qr-code/qr-pdf
         # actions) since DRF's default would otherwise route this to
@@ -437,6 +435,17 @@ class WorkOrderViewSet(
                         ]
                     }
                 )
+            if item.status == SerializedItem.STATUS_DAMAGED:
+                # AC-6: already flagged damaged (by some prior, not-yet-
+                # built direct damage report flow) - reflect that state as
+                # a no-op instead of rejecting the scan or flipping it back
+                # to available. No Transaction is created here, so a WO
+                # already carrying a damage record from that flow doesn't
+                # get a second one. STILL_OUT_COUNT_ANNOTATION already
+                # excludes only STATUS_AVAILABLE, so this item keeps
+                # counting as still-out with no extra bookkeeping needed.
+                self._refresh_line_items(work_order, _active_line_items_queryset)
+                return Response(WorkOrderReturnSerializer(work_order).data, status=200)
             if item.status != SerializedItem.STATUS_OUT:
                 raise ValidationError(
                     {

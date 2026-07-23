@@ -7,7 +7,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from inventory.models import SerializedItem, WorkOrder
+from inventory.models import SerializedItem, Transaction, WorkOrder
 from inventory.tests.factories import (
     ProductTypeFactory,
     SerializedItemFactory,
@@ -888,6 +888,23 @@ class WorkOrderReturnItemTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("serial_number", response.data)
+
+    def test_return_of_an_already_damaged_item_reflects_state_without_error(self):
+        # AC-6/TC-06
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_DAMAGED,
+        )
+
+        response = self.return_item(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_DAMAGED)
+        self.assertEqual(Transaction.objects.filter(serialized_item=item).count(), 0)
+        line_item_data = response.data["line_items"][0]
+        self.assertEqual(line_item_data["still_out_quantity"], 1)
 
     def test_return_rejects_an_item_issued_on_a_different_work_order(self):
         other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
