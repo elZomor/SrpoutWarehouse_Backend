@@ -57,6 +57,19 @@ CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_COOKIE_AGE = 60 * 60 * 24
 
+# Frontend (CF Pages) and backend (EC2) are different origins, so session/CSRF
+# cookies must be SameSite=None to survive cross-site fetch/XHR (Lax only rides
+# along on top-level navigation). SameSite=None requires Secure=True.
+SESSION_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SECURE = True
+
+# Caddy terminates TLS in front of gunicorn; without this Django sees every
+# request as plain HTTP (request.is_secure() False), breaking the Secure cookie
+# attributes above.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 
 # Application definition
 
