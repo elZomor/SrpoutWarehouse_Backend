@@ -6,6 +6,7 @@ from inventory.models import (
     PurchaseOrder,
     PurchaseOrderLineItem,
     SerializedItem,
+    Transaction,
     WorkOrder,
     WorkOrderLineItem,
 )
@@ -56,3 +57,17 @@ class WorkOrderAdmin(admin.ModelAdmin):
     list_filter = ("status",)
     search_fields = ("job_name", "client_name")
     inlines = [WorkOrderLineItemInline]
+
+
+@admin.register(Transaction)
+class TransactionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "transaction_type",
+        "reference_number",
+        "serialized_item",
+        "user",
+        "created_at",
+    )
+    list_filter = ("transaction_type",)
+    search_fields = ("reference_number", "serialized_item__serial_number")

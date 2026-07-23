@@ -9,6 +9,7 @@ from inventory.models import (
     PurchaseOrder,
     PurchaseOrderLineItem,
     SerializedItem,
+    Transaction,
     WorkOrder,
     WorkOrderLineItem,
 )
@@ -84,3 +85,14 @@ class WorkOrderLineItemFactory(factory.django.DjangoModelFactory):
     work_order = factory.SubFactory(WorkOrderFactory)
     product_type = factory.SubFactory(ProductTypeFactory)
     quantity = 1
+
+
+class TransactionFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Transaction
+
+    transaction_type = Transaction.TYPE_RECEIVE
+    serialized_item = factory.SubFactory(SerializedItemFactory)
+    user = factory.SubFactory(UserFactory)
+    reference_number = ""
+    note = ""
