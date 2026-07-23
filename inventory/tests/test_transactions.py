@@ -3,11 +3,13 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from inventory.models import Transaction
+from inventory.models import SerializedItem, Transaction, WorkOrder
 from inventory.tests.factories import (
+    ProductTypeFactory,
     SerializedItemFactory,
     TransactionFactory,
     WorkOrderFactory,
+    WorkOrderLineItemFactory,
 )
 
 
@@ -177,3 +179,98 @@ class TransactionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data, [])
+
+    def test_updating_a_transaction_directly_is_rejected(self):
+        # WRH-50/AC-3/TC-03: TransactionViewSet has no update/partial_update
+        # mixin, so DRF's router never registers a detail route at all -
+        # PUT/PATCH against /transactions/<pk>/ 404s (no route to hit),
+        # which is itself the append-only enforcement, not a permission
+        # check that could be bypassed.
+        transaction_obj = TransactionFactory(user=self.user)
+
+        response = self.client.put(
+            f"/api/transactions/{transaction_obj.id}/",
+            {"note": "tampered"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        transaction_obj.refresh_from_db()
+        self.assertEqual(transaction_obj.note, "")
+
+    def test_deleting_a_transaction_directly_is_rejected(self):
+        # WRH-50/AC-3/TC-04.
+        transaction_obj = TransactionFactory(user=self.user)
+
+        response = self.client.delete(f"/api/transactions/{transaction_obj.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(Transaction.objects.filter(pk=transaction_obj.pk).exists())
+
+    def test_original_transaction_stays_unchanged_after_a_correcting_transaction(self):
+        # WRH-50/AC-4: correcting a mistake happens via a new offsetting
+        # transaction, not an edit of the original row. TC-05 itself
+        # describes a write-off flow, which has no status-transition
+        # endpoint yet (see Transaction.TYPE_WRITTEN_OFF's own comment) -
+        # exercised here instead against the real issue/return correction
+        # flow WorkOrderViewSet already provides, which is the same
+        # principle: the original RECEIVE row is never touched by the
+        # ISSUE/RETURN rows recorded afterward for the same item.
+        product_type = ProductTypeFactory()
+        item = SerializedItemFactory(product_type=product_type)
+        original = TransactionFactory(
+            transaction_type=Transaction.TYPE_RECEIVE,
+            serialized_item=item,
+            reference_number="PO-1",
+            user=self.user,
+            note="initial receive",
+        )
+        original_snapshot = (
+            original.transaction_type,
+            original.reference_number,
+            original.note,
+            original.created_at,
+        )
+        work_order = WorkOrderFactory(status=WorkOrder.STATUS_IN_PROGRESS)
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=product_type, quantity=1
+        )
+        self.client.post(
+            reverse("workorder-scan", args=[work_order.id]),
+            {"line_item": line_item.id, "serial_number": item.serial_number},
+            format="json",
+        )
+        self.client.post(reverse("workorder-complete", args=[work_order.id]))
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+        self.client.post(
+            reverse("workorder-return-item", args=[work_order.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+
+        original.refresh_from_db()
+        self.assertEqual(
+            (
+                original.transaction_type,
+                original.reference_number,
+                original.note,
+                original.created_at,
+            ),
+            original_snapshot,
+        )
+        response = self.client.get(reverse("transaction-list"))
+        returned_types = [
+            row["transaction_type"]
+            for row in response.data
+            if row["serial_number"] == item.serial_number
+        ]
+        self.assertEqual(
+            returned_types,
+            [
+                Transaction.TYPE_RECEIVE,
+                Transaction.TYPE_ISSUE,
+                Transaction.TYPE_RETURN,
+            ],
+        )
