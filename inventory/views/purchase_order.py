@@ -6,7 +6,12 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from inventory.models import PurchaseOrder, PurchaseOrderLineItem, SerializedItem
+from inventory.models import (
+    PurchaseOrder,
+    PurchaseOrderLineItem,
+    SerializedItem,
+    Transaction,
+)
 from inventory.models.purchase_order import RECEIVED_COUNT_ANNOTATION
 from inventory.serializers import (
     PurchaseOrderReceiveSerializer,
@@ -123,7 +128,7 @@ class PurchaseOrderViewSet(
                 )
 
             try:
-                SerializedItem.objects.create(
+                item = SerializedItem.objects.create(
                     product_type=line_item.product_type,
                     serial_number=serial_number,
                     purchase_order_line_item=line_item,
@@ -137,6 +142,14 @@ class PurchaseOrderViewSet(
                 raise ValidationError(
                     {"serial_number": [duplicate_serial_number_message(serial_number)]}
                 ) from exc
+
+            # WRH-49/AC-1: log the receive as its own transaction row.
+            Transaction.objects.create(
+                transaction_type=Transaction.TYPE_RECEIVE,
+                serialized_item=item,
+                reference_number=f"PO-{purchase_order.id}",
+                user=request.user,
+            )
 
             # purchase_order was fetched with no prefetch at all (see
             # get_queryset() above), so this is the one place its

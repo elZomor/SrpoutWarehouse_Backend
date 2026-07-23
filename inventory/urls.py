@@ -9,6 +9,7 @@ from inventory.views import (
     ProductTypeViewSet,
     PurchaseOrderViewSet,
     SerializedItemViewSet,
+    TransactionViewSet,
     WorkOrderViewSet,
 )
 
@@ -18,6 +19,7 @@ router.register("categories", CategoryViewSet)
 router.register("serialized-items", SerializedItemViewSet)
 router.register("purchase-orders", PurchaseOrderViewSet)
 router.register("work-orders", WorkOrderViewSet)
+router.register("transactions", TransactionViewSet)
 
 urlpatterns = [
     path("auth/login/", LoginView.as_view(), name="login"),

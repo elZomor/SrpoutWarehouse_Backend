@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from inventory.models import SerializedItem, WorkOrder, WorkOrderLineItem
+from inventory.models import SerializedItem, Transaction, WorkOrder, WorkOrderLineItem
 from inventory.models.work_order import (
     RETURNED_COUNT_ANNOTATION,
     SCANNED_COUNT_ANNOTATION,
@@ -345,11 +345,32 @@ class WorkOrderViewSet(
                     }
                 )
 
+            # WRH-49/AC-1: capture which items this bulk update is about to
+            # flip to "out" before it runs, so a transaction row can be
+            # logged for each one below - the update() call itself returns
+            # only a row count, not the affected rows.
+            issued_item_ids = list(
+                SerializedItem.objects.filter(
+                    work_order_line_item__work_order_id=work_order.id
+                ).values_list("id", flat=True)
+            )
             SerializedItem.objects.filter(
                 work_order_line_item__work_order_id=work_order.id
             ).update(
                 status=SerializedItem.STATUS_OUT,
                 last_work_order_reference=str(work_order),
+            )
+            Transaction.objects.bulk_create(
+                [
+                    Transaction(
+                        transaction_type=Transaction.TYPE_ISSUE,
+                        serialized_item_id=item_id,
+                        work_order=work_order,
+                        reference_number=f"WO-{work_order.id}",
+                        user=request.user,
+                    )
+                    for item_id in issued_item_ids
+                ]
             )
             work_order.status = WorkOrder.STATUS_FULFILLED
             work_order.save(update_fields=["status"])
@@ -437,6 +458,15 @@ class WorkOrderViewSet(
             # introduces on its own.
             item.status = SerializedItem.STATUS_AVAILABLE
             item.save(update_fields=["status"])
+
+            # WRH-49/AC-1: log the return as its own transaction row.
+            Transaction.objects.create(
+                transaction_type=Transaction.TYPE_RETURN,
+                serialized_item=item,
+                work_order=work_order,
+                reference_number=f"WO-{work_order.id}",
+                user=request.user,
+            )
 
             # Matches RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's
             # definition (still out = anything but available) so a
