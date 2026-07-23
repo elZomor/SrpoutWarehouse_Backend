@@ -1,5 +1,5 @@
 from django.db import IntegrityError
-from django.db.models import ProtectedError
+from django.db.models import Count, ProtectedError, Q
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -7,8 +7,18 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from inventory.models import ProductType
-from inventory.serializers import ProductTypeSerializer
+from inventory.models import ProductType, SerializedItem
+from inventory.models.product_type import (
+    AVAILABLE_COUNT_ANNOTATION,
+    DAMAGED_COUNT_ANNOTATION,
+    MISSING_COUNT_ANNOTATION,
+    OUT_COUNT_ANNOTATION,
+    TOTAL_COUNT_ANNOTATION,
+)
+from inventory.serializers import (
+    ProductTypeSerializer,
+    ProductTypeStockSummarySerializer,
+)
 
 
 class ProductTypeViewSet(
@@ -44,11 +54,47 @@ class ProductTypeViewSet(
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        if self.action == "list":
-            # AC-4/AC-6/TC-06: archived product types are hidden from the
-            # default list, which is also what the SerializedItem
-            # registration form's product-type selector queries.
+        if self.action in ("list", "stock_summary"):
+            # AC-4/AC-6/TC-06 (list); WRH-48/TC-07 (stock_summary) - archived
+            # product types are hidden the same way everywhere they're
+            # reachable, matching the SerializedItem registration form's
+            # product-type selector and this repo's "exclude archived
+            # everywhere, not just the default list" convention.
             queryset = queryset.filter(archived=False)
+        if self.action == "stock_summary":
+            # WRH-48/AC-1/AC-2/AC-5: one row per product type, every count a
+            # direct DB-level Count(filter=...) rather than arithmetic - see
+            # ProductTypeStockSummarySerializer's comment for why. AC-5 (a
+            # product type with zero items) falls out for free: Count's SQL
+            # aggregate returns 0 (not NULL) over an empty related set,
+            # unlike Sum/Avg.
+            queryset = queryset.annotate(
+                **{
+                    TOTAL_COUNT_ANNOTATION: Count("serialized_items"),
+                    OUT_COUNT_ANNOTATION: Count(
+                        "serialized_items",
+                        filter=Q(serialized_items__status=SerializedItem.STATUS_OUT),
+                    ),
+                    DAMAGED_COUNT_ANNOTATION: Count(
+                        "serialized_items",
+                        filter=Q(
+                            serialized_items__status=SerializedItem.STATUS_DAMAGED
+                        ),
+                    ),
+                    MISSING_COUNT_ANNOTATION: Count(
+                        "serialized_items",
+                        filter=Q(
+                            serialized_items__status=SerializedItem.STATUS_MISSING
+                        ),
+                    ),
+                    AVAILABLE_COUNT_ANNOTATION: Count(
+                        "serialized_items",
+                        filter=Q(
+                            serialized_items__status=SerializedItem.STATUS_AVAILABLE
+                        ),
+                    ),
+                }
+            )
         return queryset
 
     def filter_queryset(self, queryset):
@@ -107,3 +153,17 @@ class ProductTypeViewSet(
         product_type.archived = True
         product_type.save(update_fields=["archived"])
         return Response(self.get_serializer(product_type).data)
+
+    def get_serializer_class(self):
+        if self.action == "stock_summary":
+            return ProductTypeStockSummarySerializer
+        return super().get_serializer_class()
+
+    @action(detail=False, methods=["get"], url_path="stock-summary")
+    def stock_summary(self, request):
+        # AC-6 (no product types at all) is just an empty list - reuses
+        # ListModelMixin's list() (no pagination is configured project-wide,
+        # so this returns every row, matching WorkOrderViewSet.active()'s
+        # identical reuse of self.list()); get_queryset() above does the
+        # actual shaping for this action.
+        return self.list(request)

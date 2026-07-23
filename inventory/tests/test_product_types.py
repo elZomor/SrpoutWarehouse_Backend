@@ -6,7 +6,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from inventory.models import ProductType
+from inventory.models import ProductType, SerializedItem
 from inventory.tests.factories import (
     CategoryFactory,
     ProductTypeFactory,
@@ -362,3 +362,123 @@ class ProductTypeTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data, [])
+
+
+class ProductTypeStockSummaryTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.category = CategoryFactory()
+
+    def _summary_for(self, response, product_type_id):
+        return next(row for row in response.data if row["id"] == product_type_id)
+
+    def test_shows_counts_per_status(self):
+        # AC-1/TC-01: total registered, out, damaged, missing, available.
+        product_type = ProductTypeFactory(category=self.category)
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_AVAILABLE
+        )
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_OUT
+        )
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_DAMAGED
+        )
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_MISSING
+        )
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = self._summary_for(response, product_type.id)
+        self.assertEqual(row["total_registered"], 4)
+        self.assertEqual(row["out"], 1)
+        self.assertEqual(row["damaged"], 1)
+        self.assertEqual(row["missing"], 1)
+        self.assertEqual(row["available"], 1)
+
+    def test_available_count_is_computed_correctly(self):
+        # AC-2/TC-02: 100 total, 30 out, 5 damaged, 2 missing, 1 written_off
+        # -> Available = 62.
+        product_type = ProductTypeFactory(category=self.category)
+        for _ in range(62):
+            SerializedItemFactory(
+                product_type=product_type, status=SerializedItem.STATUS_AVAILABLE
+            )
+        for _ in range(30):
+            SerializedItemFactory(
+                product_type=product_type, status=SerializedItem.STATUS_OUT
+            )
+        for _ in range(5):
+            SerializedItemFactory(
+                product_type=product_type, status=SerializedItem.STATUS_DAMAGED
+            )
+        for _ in range(2):
+            SerializedItemFactory(
+                product_type=product_type, status=SerializedItem.STATUS_MISSING
+            )
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_WRITTEN_OFF
+        )
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        row = self._summary_for(response, product_type.id)
+        self.assertEqual(row["total_registered"], 100)
+        self.assertEqual(row["available"], 62)
+
+    def test_reserved_items_are_not_counted_as_available(self):
+        # A reserved item is claimed by an in-progress WO, not free stock -
+        # it must not be double-counted as available.
+        product_type = ProductTypeFactory(category=self.category)
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_RESERVED
+        )
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        row = self._summary_for(response, product_type.id)
+        self.assertEqual(row["total_registered"], 1)
+        self.assertEqual(row["available"], 0)
+
+    def test_product_type_with_zero_items_shows_all_zeros(self):
+        # AC-5/TC-05
+        product_type = ProductTypeFactory(category=self.category)
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        row = self._summary_for(response, product_type.id)
+        self.assertEqual(row["total_registered"], 0)
+        self.assertEqual(row["out"], 0)
+        self.assertEqual(row["damaged"], 0)
+        self.assertEqual(row["missing"], 0)
+        self.assertEqual(row["available"], 0)
+
+    def test_no_product_types_shows_empty_list(self):
+        # AC-6/TC-06
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_archived_product_types_are_excluded(self):
+        # TC-07: matches the default list's archived-exclusion convention.
+        archived = ProductTypeFactory(category=self.category, archived=True)
+        active = ProductTypeFactory(category=self.category)
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        ids = [row["id"] for row in response.data]
+        self.assertIn(active.id, ids)
+        self.assertNotIn(archived.id, ids)
+
+    def test_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
