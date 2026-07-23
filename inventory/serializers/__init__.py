@@ -1,6 +1,9 @@
 from inventory.serializers.auth import LoginSerializer, UserSerializer
 from inventory.serializers.category import CategorySerializer
 from inventory.serializers.product_type import ProductTypeSerializer
+from inventory.serializers.product_type_stock_summary import (
+    ProductTypeStockSummarySerializer,
+)
 from inventory.serializers.purchase_order import (
     PurchaseOrderLineItemSerializer,
     PurchaseOrderReceiveSerializer,
@@ -23,6 +26,7 @@ __all__ = [
     "UserSerializer",
     "CategorySerializer",
     "ProductTypeSerializer",
+    "ProductTypeStockSummarySerializer",
     "PurchaseOrderLineItemSerializer",
     "PurchaseOrderReceiveSerializer",
     "PurchaseOrderSerializer",

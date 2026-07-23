@@ -28,12 +28,20 @@ class SerializedItem(models.Model):
     # rejection logic below has a real status to check against.
     STATUS_DAMAGED = "damaged"
     STATUS_MISSING = "missing"
+    # WRH-48/AC-2: the stock dashboard's Available formula needs a real
+    # status to subtract, the same way STATUS_DAMAGED/STATUS_MISSING existed
+    # before any endpoint set them - nothing yet sets an item to
+    # written_off either (that's a future write-off ticket); this exists so
+    # the dashboard's available count is correct and complete now rather
+    # than silently wrong once a write-off action ships later.
+    STATUS_WRITTEN_OFF = "written_off"
     STATUS_CHOICES = [
         (STATUS_AVAILABLE, "Available"),
         (STATUS_RESERVED, "Reserved"),
         (STATUS_OUT, "Out"),
         (STATUS_DAMAGED, "Damaged"),
         (STATUS_MISSING, "Missing"),
+        (STATUS_WRITTEN_OFF, "Written off"),
     ]
 
     serial = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
