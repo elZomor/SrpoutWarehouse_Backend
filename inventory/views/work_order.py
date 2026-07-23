@@ -8,6 +8,7 @@ from rest_framework.response import Response
 
 from inventory.models import SerializedItem, Transaction, WorkOrder, WorkOrderLineItem
 from inventory.models.work_order import (
+    DAMAGED_COUNT_ANNOTATION,
     RETURNED_COUNT_ANNOTATION,
     SCANNED_COUNT_ANNOTATION,
     STILL_OUT_COUNT_ANNOTATION,
@@ -64,16 +65,25 @@ def _active_line_items_queryset():
     # WRH-55/AC-2: same one-query-per-list shape as _line_items_queryset(),
     # but counting by SerializedItem.status instead of raw scan count - see
     # RETURNED_COUNT_ANNOTATION's model-level comment for why still_out
-    # excludes AVAILABLE rather than only counting STATUS_OUT.
+    # excludes AVAILABLE *and* DAMAGED (WRH-57/AC-3) rather than only
+    # counting STATUS_OUT.
+    _not_still_out = (
+        SerializedItem.STATUS_AVAILABLE,
+        SerializedItem.STATUS_DAMAGED,
+    )
     return WorkOrderLineItem.objects.select_related("product_type").annotate(
         **{
             RETURNED_COUNT_ANNOTATION: Count(
                 "serialized_items",
                 filter=Q(serialized_items__status=SerializedItem.STATUS_AVAILABLE),
             ),
+            DAMAGED_COUNT_ANNOTATION: Count(
+                "serialized_items",
+                filter=Q(serialized_items__status=SerializedItem.STATUS_DAMAGED),
+            ),
             STILL_OUT_COUNT_ANNOTATION: Count(
                 "serialized_items",
-                filter=~Q(serialized_items__status=SerializedItem.STATUS_AVAILABLE),
+                filter=~Q(serialized_items__status__in=_not_still_out),
             ),
         }
     )
@@ -384,11 +394,14 @@ class WorkOrderViewSet(
         # flips back to "available"; once none remain out the WO moves to
         # "returned", otherwise "partially_returned" - re-scanning a
         # partially_returned WO's remaining items (AC-4) reuses this same
-        # action, no separate "reopen" step needed. Box-QR return (AC-3)
-        # needs a Box/Container model that doesn't exist yet - deferred to
-        # WRH-5 (see WorkOrderReturnScanSerializer's comment). WRH-39/AC-6:
-        # an item already flagged damaged is reflected as-is (see the
-        # STATUS_DAMAGED branch below) rather than rejected outright.
+        # action, no separate "reopen" step needed. Box-QR return (AC-3 of
+        # WRH-38) needs a Box/Container model that doesn't exist yet -
+        # deferred to WRH-5 (see WorkOrderReturnScanSerializer's comment).
+        # WRH-39/AC-6: an item already flagged damaged is reflected as-is
+        # (see the STATUS_DAMAGED branch below) rather than rejected
+        # outright. WRH-57/AC-1: the same scan can instead flag the unit as
+        # damaged (serializer's damaged=True) rather than returning it to
+        # available stock - see the damaged branch further down.
         #
         # url_path is explicit (matches serialized_item.py's qr-code/qr-pdf
         # actions) since DRF's default would otherwise route this to
@@ -436,14 +449,15 @@ class WorkOrderViewSet(
                     }
                 )
             if item.status == SerializedItem.STATUS_DAMAGED:
-                # AC-6: already flagged damaged (by some prior, not-yet-
-                # built direct damage report flow) - reflect that state as
-                # a no-op instead of rejecting the scan or flipping it back
-                # to available. No Transaction is created here, so a WO
-                # already carrying a damage record from that flow doesn't
-                # get a second one. STILL_OUT_COUNT_ANNOTATION already
-                # excludes only STATUS_AVAILABLE, so this item keeps
-                # counting as still-out with no extra bookkeeping needed.
+                # WRH-39/AC-6: already flagged damaged (by a prior scan
+                # through this same action's damaged=True branch below, or
+                # any other path) - reflect that state as a no-op instead of
+                # rejecting the scan or flipping it back to available. No
+                # Transaction is created here, so a WO already carrying a
+                # damage record doesn't get a second one.
+                # DAMAGED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION already
+                # categorize this item correctly (damaged, not still-out) so
+                # no extra bookkeeping is needed.
                 self._refresh_line_items(work_order, _active_line_items_queryset)
                 return Response(WorkOrderReturnSerializer(work_order).data, status=200)
             if item.status != SerializedItem.STATUS_OUT:
@@ -465,12 +479,25 @@ class WorkOrderViewSet(
             # after the fact - an accepted limitation of not having a
             # separate history/audit table, not something return_item
             # introduces on its own.
-            item.status = SerializedItem.STATUS_AVAILABLE
+            #
+            # WRH-57/AC-1: a manager can flag the returning unit as damaged
+            # instead of a normal return - it moves to STATUS_DAMAGED (not
+            # STATUS_AVAILABLE) and is logged as TYPE_DAMAGED, so it's
+            # excluded from available stock and from the WO's "returned"
+            # count, matching Transaction.TYPE_DAMAGED's own comment that it
+            # was reserved for exactly this kind of future action.
+            damaged = serializer.validated_data["damaged"]
+            item.status = (
+                SerializedItem.STATUS_DAMAGED
+                if damaged
+                else SerializedItem.STATUS_AVAILABLE
+            )
             item.save(update_fields=["status"])
 
-            # WRH-49/AC-1: log the return as its own transaction row.
             Transaction.objects.create(
-                transaction_type=Transaction.TYPE_RETURN,
+                transaction_type=(
+                    Transaction.TYPE_DAMAGED if damaged else Transaction.TYPE_RETURN
+                ),
                 serialized_item=item,
                 work_order=work_order,
                 reference_number=f"WO-{work_order.id}",
@@ -478,19 +505,26 @@ class WorkOrderViewSet(
             )
 
             # Matches RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's
-            # definition (still out = anything but available) so a
-            # damaged/missing item doesn't silently vanish from this count
-            # instead of keeping the WO at partially_returned. Safe as a
-            # plain unlocked .count() only because the parent WorkOrder row
-            # is already locked above - every status-mutating action on
-            # this WO (start/scan/complete/return_item) takes that same
-            # lock first, so concurrent writers against this WO's items are
-            # already serialized by the time this line runs.
+            # definition (still out = anything but available or damaged -
+            # WRH-57/AC-3) so a missing item doesn't silently vanish from
+            # this count instead of keeping the WO at partially_returned,
+            # while a damaged one no longer keeps the WO out of "returned"
+            # either. Safe as a plain unlocked .count() only because the
+            # parent WorkOrder row is already locked above - every
+            # status-mutating action on this WO (start/scan/complete/
+            # return_item) takes that same lock first, so concurrent
+            # writers against this WO's items are already serialized by the
+            # time this line runs.
             still_out = (
                 SerializedItem.objects.filter(
                     work_order_line_item__work_order_id=work_order.id
                 )
-                .exclude(status=SerializedItem.STATUS_AVAILABLE)
+                .exclude(
+                    status__in=[
+                        SerializedItem.STATUS_AVAILABLE,
+                        SerializedItem.STATUS_DAMAGED,
+                    ]
+                )
                 .count()
             )
             work_order.status = (
