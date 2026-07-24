@@ -72,6 +72,18 @@ class WorkOrderLineItemSerializer(serializers.ModelSerializer):
         return max(obj.quantity - self.get_scanned_quantity(obj), 0)
 
 
+def _work_order_reference(obj):
+    # WRH-53/AC-1/AC-2: the "WO-0042"/"WO-0042-S1" display identifier -
+    # shared by every serializer below that surfaces it, so the format only
+    # lives in one place. A Primary WO is just "WO-<id>" (matches the
+    # pre-existing f"WO-{work_order.id}" convention used elsewhere, e.g.
+    # Transaction.reference_number in views/work_order.py); a supplementary
+    # appends "-S<sequence>" using its parent's id, not its own.
+    if obj.parent_work_order_id:
+        return f"WO-{obj.parent_work_order_id}-S{obj.supplementary_sequence}"
+    return f"WO-{obj.id}"
+
+
 class WorkOrderSerializer(serializers.ModelSerializer):
     # ModelSerializer's nested-write support stops at validation - create()
     # below has to build the line items itself, DRF won't do it implicitly.
@@ -79,20 +91,43 @@ class WorkOrderSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(
         source="created_by.username", read_only=True
     )
+    # WRH-53/AC-1/AC-2: optional - creates a supplementary linked to an
+    # existing Primary when provided. The queryset restriction
+    # (parent_work_order__isnull=True) both scopes the field to real
+    # Primaries and enforces WRH-33/AC-6 ("a supplementary cannot itself be
+    # a parent") for free, matching the archived-product-type
+    # queryset-restriction convention used elsewhere in this file rather
+    # than a fresh manual check.
+    parent_work_order = serializers.PrimaryKeyRelatedField(
+        queryset=WorkOrder.objects.filter(parent_work_order__isnull=True),
+        required=False,
+        allow_null=True,
+        error_messages={
+            "does_not_exist": (
+                "Select a work order that exists and is not itself a " "supplementary."
+            ),
+        },
+    )
+    reference = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkOrder
         fields = [
             "id",
+            "reference",
             "job_name",
             "client_name",
             "expected_date_out",
             "status",
             "created_by",
             "created_by_username",
+            "parent_work_order",
             "line_items",
         ]
         read_only_fields = ["status", "created_by"]
+
+    def get_reference(self, obj):
+        return _work_order_reference(obj)
 
     def validate_line_items(self, value):
         # AC-1: a WO is created "with ... line items (product type +
@@ -104,11 +139,29 @@ class WorkOrderSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         line_items_data = validated_data.pop("line_items")
+        parent_work_order = validated_data.pop("parent_work_order", None)
         # Both writes must land together - a bulk_create() failure (e.g. a
         # DB-level constraint one of the line items happens to violate)
         # would otherwise leave a persisted WorkOrder with zero line items,
         # violating validate_line_items()'s "at least one" invariant.
         with transaction.atomic():
+            if parent_work_order is not None:
+                # AC-1/AC-2: lock the Primary row so two concurrent
+                # supplementary creates against the same Primary can't both
+                # read the same sibling count and assign the same next
+                # sequence number - matches this repo's "lock the row whose
+                # invariant you're protecting" convention (WRH-56) rather
+                # than a bare check-then-act count.
+                parent_work_order = WorkOrder.objects.select_for_update().get(
+                    pk=parent_work_order.pk
+                )
+                validated_data["parent_work_order"] = parent_work_order
+                validated_data["supplementary_sequence"] = (
+                    WorkOrder.objects.filter(
+                        parent_work_order=parent_work_order
+                    ).count()
+                    + 1
+                )
             work_order = WorkOrder.objects.create(**validated_data)
             WorkOrderLineItem.objects.bulk_create(
                 WorkOrderLineItem(work_order=work_order, **line_item)
@@ -205,17 +258,25 @@ class WorkOrderActiveSupplementarySerializer(serializers.ModelSerializer):
     # "supplementaries" field (supplementaries are one level deep only -
     # there's no path to create a supplementary-of-a-supplementary).
     line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
+    # WRH-53/AC-1/AC-2: "WO-0042-S1" shown alongside the Primary it's nested
+    # under - no extra query, reads plain columns already on the fetched
+    # row (see _work_order_reference).
+    reference = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkOrder
         fields = [
             "id",
+            "reference",
             "job_name",
             "client_name",
             "expected_date_out",
             "status",
             "line_items",
         ]
+
+    def get_reference(self, obj):
+        return _work_order_reference(obj)
 
 
 class WorkOrderActiveSerializer(serializers.ModelSerializer):
@@ -224,11 +285,13 @@ class WorkOrderActiveSerializer(serializers.ModelSerializer):
     # per-type returned/still-out summary counts (AC-2).
     line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
     supplementaries = WorkOrderActiveSupplementarySerializer(many=True, read_only=True)
+    reference = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkOrder
         fields = [
             "id",
+            "reference",
             "job_name",
             "client_name",
             "expected_date_out",
@@ -236,6 +299,9 @@ class WorkOrderActiveSerializer(serializers.ModelSerializer):
             "line_items",
             "supplementaries",
         ]
+
+    def get_reference(self, obj):
+        return _work_order_reference(obj)
 
 
 class WorkOrderReturnSerializer(serializers.ModelSerializer):
@@ -284,11 +350,15 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(
         source="created_by.username", read_only=True
     )
+    # TC-03: a supplementary's detail view shows its own reference, distinct
+    # from the Primary's.
+    reference = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkOrder
         fields = [
             "id",
+            "reference",
             "job_name",
             "client_name",
             "expected_date_out",
@@ -298,3 +368,6 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
             "parent_work_order",
             "line_items",
         ]
+
+    def get_reference(self, obj):
+        return _work_order_reference(obj)
