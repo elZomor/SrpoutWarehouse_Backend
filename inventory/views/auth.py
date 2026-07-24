@@ -44,10 +44,13 @@ class LoginView(APIView):
             )
 
         login(request, user)
-        # Ensure the CSRF cookie is issued alongside the session cookie, so the
-        # SPA can send X-CSRFToken on subsequent authenticated, unsafe requests.
-        get_token(request)
-        return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+        response = Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+        # Frontend and backend are on different registrable domains, so the SPA's
+        # JS can't read the csrftoken cookie get_token() sets (cross-domain cookies
+        # aren't visible to document.cookie). Hand the token back via a response
+        # header instead, which the SPA can read and echo as X-CSRFToken.
+        response["X-CSRFToken"] = get_token(request)
+        return response
 
 
 class LogoutView(APIView):
@@ -62,4 +65,8 @@ class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(UserSerializer(request.user).data)
+        # A page reload loses whatever CSRF token the SPA cached in memory from
+        # login, so re-issue it here too (same cross-domain reasoning as LoginView).
+        response = Response(UserSerializer(request.user).data)
+        response["X-CSRFToken"] = get_token(request)
+        return response
