@@ -97,10 +97,11 @@ class WorkOrderViewSet(
 ):
     # WRH-31 (US-011a) scopes create+list; WRH-54 (US-013a) adds the
     # start/scan/complete actions below; WRH-55 (US-014a) adds retrieve
-    # (AC-3 drill-down) and the active action (AC-1/AC-2 list) below -
-    # field validation (WRH-32) and supplementary creation (US-012a, still
-    # no ticket/UI) are the remaining unscoped gaps, so update/destroy stay
-    # unregistered.
+    # (AC-3 drill-down) and the active action (AC-1/AC-2 list) below;
+    # WRH-53 (US-012a) adds supplementary creation - same create endpoint,
+    # WorkOrderSerializer.parent_work_order is just an optional field on it,
+    # no new route needed. update/destroy stay unregistered - out of every
+    # WO story's scope so far.
     permission_classes = [IsAuthenticated]
     queryset = WorkOrder.objects.select_related("created_by").prefetch_related(
         Prefetch("line_items", queryset=_line_items_queryset())

@@ -57,10 +57,10 @@ class WorkOrder(models.Model):
         related_name="work_orders",
     )
     # WRH-55/AC-1: a Primary WO's supplementaries are shown nested beneath
-    # it. Supplementary *creation* (US-012a) has no ticket/UI yet - this
-    # field only exists so the list/detail views have something to nest -
-    # null means "this WO is itself a Primary". PROTECT: a Primary WO
-    # shouldn't be deletable out from under its supplementaries.
+    # it. WRH-53/US-012a: also the field the create endpoint now writes to
+    # link a new supplementary to its Primary - null means "this WO is
+    # itself a Primary". PROTECT: a Primary WO shouldn't be deletable out
+    # from under its supplementaries.
     parent_work_order = models.ForeignKey(
         "self",
         on_delete=models.PROTECT,
@@ -68,9 +68,30 @@ class WorkOrder(models.Model):
         null=True,
         blank=True,
     )
+    # WRH-53/AC-1/AC-2: 1-indexed position among this WO's siblings under
+    # the same parent, assigned once at creation time (see
+    # WorkOrderSerializer.create()) - combined with parent_work_order_id it
+    # renders as "WO-<parent id>-S<sequence>". null for a Primary WO (it has
+    # no parent to be numbered against). Stored rather than derived on read
+    # so a supplementary's identifier stays stable even if the read-time
+    # sibling ordering could ever change.
+    supplementary_sequence = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ["-expected_date_out", "-id"]
+        constraints = [
+            # Defense-in-depth alongside the select_for_update() lock in
+            # WorkOrderSerializer.create() - a genuine duplicate would be a
+            # bug in that locking, not something expected to fire in
+            # practice. Two Primary WOs both having
+            # (parent_work_order=None, supplementary_sequence=None) doesn't
+            # collide - Postgres/SQLite both treat NULL as distinct from
+            # NULL in a unique constraint.
+            models.UniqueConstraint(
+                fields=["parent_work_order", "supplementary_sequence"],
+                name="unique_supplementary_sequence_per_parent",
+            )
+        ]
 
     def __str__(self):
         return f"WO-{self.id} ({self.job_name})"
@@ -78,12 +99,15 @@ class WorkOrder(models.Model):
     def clean(self):
         # WRH-33/AC-6: only a Primary WO (parent_work_order is null) can be
         # a parent - a supplementary can't itself have supplementaries.
-        # There's no API path that sets parent_work_order yet (WRH-55's own
-        # comment on the field above), but Django admin's default
-        # ModelForm calls full_clean() and exposes every model field
-        # unrestricted, so this guard is reachable today even with no
-        # dedicated create endpoint - matches the WRH-56 lesson that admin
-        # is a real caller, not just the registered API routes.
+        # Django admin's default ModelForm calls full_clean() and exposes
+        # every model field unrestricted, so this guard stays needed there
+        # regardless of the API - matches the WRH-56 lesson that admin is a
+        # real caller, not just the registered API routes. The API path
+        # (WRH-53) enforces the identical rule its own way, via
+        # WorkOrderSerializer.parent_work_order's queryset restriction
+        # rather than by calling full_clean() (ModelSerializer.create()
+        # doesn't call it), so both callers are covered without duplicating
+        # the query logic.
         super().clean()
         if self.parent_work_order_id and self.parent_work_order.parent_work_order_id:
             raise ValidationError(

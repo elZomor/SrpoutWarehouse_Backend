@@ -400,6 +400,157 @@ class WorkOrderTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class WorkOrderSupplementaryCreationTests(APITestCase):
+    # WRH-53/US-012a: creating a supplementary WO linked to an existing
+    # Primary via the same create endpoint WorkOrderTests exercises above -
+    # parent_work_order is just an optional field on it.
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+
+    def _create_work_order(self, **overrides):
+        payload = {
+            "job_name": "Summer Gala",
+            "expected_date_out": "2026-08-01",
+            "line_items": [{"product_type": self.product_type.id, "quantity": 5}],
+        }
+        payload.update(overrides)
+        return self.client.post(reverse("workorder-list"), payload, format="json")
+
+    def test_primary_work_order_reference_is_wo_plus_id(self):
+        response = self._create_work_order()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["reference"], f"WO-{response.data['id']}")
+        self.assertIsNone(response.data["parent_work_order"])
+
+    def test_create_supplementary_is_saved_as_primary_reference_plus_s1(self):
+        # AC-1/TC-01: "WO-0042" -> its first supplementary is "WO-0042-S1".
+        primary = WorkOrderFactory(created_by=self.user)
+
+        response = self._create_work_order(parent_work_order=primary.id)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["reference"], f"WO-{primary.id}-S1")
+        self.assertEqual(response.data["parent_work_order"], primary.id)
+
+    def test_create_second_supplementary_is_saved_as_s2(self):
+        # AC-2/TC-02: a second supplementary on the same Primary is "-S2",
+        # both nested under the same Primary.
+        primary = WorkOrderFactory(created_by=self.user)
+        self._create_work_order(parent_work_order=primary.id)
+
+        response = self._create_work_order(parent_work_order=primary.id)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["reference"], f"WO-{primary.id}-S2")
+        self.assertEqual(WorkOrder.objects.filter(parent_work_order=primary).count(), 2)
+
+    def test_supplementary_has_its_own_line_items_separate_from_primary(self):
+        # TC-03: the supplementary's own line items, not the Primary's.
+        primary = WorkOrderFactory(created_by=self.user)
+        WorkOrderLineItemFactory(
+            work_order=primary, product_type=self.product_type, quantity=3
+        )
+        other_type = ProductTypeFactory()
+
+        create_response = self._create_work_order(
+            parent_work_order=primary.id,
+            line_items=[{"product_type": other_type.id, "quantity": 2}],
+        )
+        supplementary_id = create_response.data["id"]
+
+        detail_response = self.client.get(
+            reverse("workorder-detail", args=[supplementary_id])
+        )
+
+        self.assertEqual(len(detail_response.data["line_items"]), 1)
+        self.assertEqual(
+            detail_response.data["line_items"][0]["product_type"], other_type.id
+        )
+        self.assertEqual(detail_response.data["line_items"][0]["quantity"], 2)
+
+    def test_supplementary_appears_nested_under_primary_in_active_list(self):
+        # AC-1: "appears nested under the Primary in the WO list."
+        primary = WorkOrderFactory(created_by=self.user)
+
+        create_response = self._create_work_order(parent_work_order=primary.id)
+
+        active_response = self.client.get(reverse("workorder-active"))
+
+        self.assertEqual(active_response.status_code, status.HTTP_200_OK)
+        row = next(r for r in active_response.data if r["id"] == primary.id)
+        self.assertEqual(len(row["supplementaries"]), 1)
+        self.assertEqual(row["supplementaries"][0]["id"], create_response.data["id"])
+        self.assertEqual(
+            row["supplementaries"][0]["reference"], create_response.data["reference"]
+        )
+
+    def test_create_supplementary_rejects_a_supplementary_as_parent(self):
+        # WRH-33/AC-6/TC-06: the rule was already enforced at the model
+        # level with no reachable API path - this ticket adds the path, so
+        # confirm it's actually enforced through it now.
+        primary = WorkOrderFactory(created_by=self.user)
+        supplementary = WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            supplementary_sequence=1,
+        )
+
+        response = self._create_work_order(parent_work_order=supplementary.id)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("parent_work_order", response.data)
+        self.assertEqual(
+            WorkOrder.objects.filter(parent_work_order=supplementary).count(), 0
+        )
+
+    def test_create_supplementary_rejects_nonexistent_parent(self):
+        response = self._create_work_order(parent_work_order=999999)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("parent_work_order", response.data)
+
+    def test_create_supplementary_sequence_is_race_safe_under_concurrent_creates(
+        self,
+    ):
+        # Simulates a second create() landing between reading the sibling
+        # count and the lock being acquired - matches
+        # WorkOrderScanTests/WorkOrderReturnItemTests's identical
+        # race-simulation technique (WRH-56 lesson).
+        primary = WorkOrderFactory(created_by=self.user)
+        original_select_for_update = WorkOrder.objects.select_for_update
+
+        def create_sibling_then_lock(*args, **kwargs):
+            WorkOrder.objects.create(
+                job_name="Racing supplementary",
+                expected_date_out="2026-08-01",
+                created_by=self.user,
+                parent_work_order=primary,
+                supplementary_sequence=1,
+            )
+            return original_select_for_update(*args, **kwargs)
+
+        with patch.object(
+            WorkOrder.objects, "select_for_update", create_sibling_then_lock
+        ):
+            response = self._create_work_order(parent_work_order=primary.id)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["reference"], f"WO-{primary.id}-S2")
+
+    def test_create_supplementary_requires_authentication(self):
+        primary = WorkOrderFactory(created_by=self.user)
+        self.client.force_authenticate(user=None)
+
+        response = self._create_work_order(parent_work_order=primary.id)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
 class WorkOrderStartFulfillmentTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(
