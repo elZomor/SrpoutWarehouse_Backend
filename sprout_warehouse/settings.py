@@ -51,6 +51,11 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 
+# The Set-Cookie header carrying csrftoken is never readable by cross-domain JS,
+# so LoginView/MeView also hand the token back as a plain response header; that
+# header must be explicitly exposed for the SPA's fetch/XHR to read it.
+CORS_EXPOSE_HEADERS = ["X-CSRFToken"]
+
 # Sessions (Technical Notes v1.0, open questions #1-2): DB-backed since Postgres is
 # already required infra and there's no Redis in docker-compose.yml for this MVP's
 # single-account-per-company scale. Session/cookie expires after 1 day.
