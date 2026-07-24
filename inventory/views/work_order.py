@@ -1,10 +1,14 @@
 from django.db import transaction
 from django.db.models import Count, Prefetch, Q, prefetch_related_objects
+from django.http import HttpResponse
+from django.template.loader import render_to_string
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+from weasyprint import HTML
 
 from inventory.models import SerializedItem, Transaction, WorkOrder, WorkOrderLineItem
 from inventory.models.work_order import (
@@ -21,6 +25,7 @@ from inventory.serializers import (
     WorkOrderScanSerializer,
     WorkOrderSerializer,
 )
+from inventory.serializers.work_order import _work_order_reference
 
 # WRH-38: a WO is eligible for return once it's fulfilled, or already
 # partially returned (AC-4: completing a partially_returned WO reuses the
@@ -163,6 +168,31 @@ class WorkOrderViewSet(
                         )
                     ),
                 )
+            )
+        if self.action == "packing_list":
+            # WRH-34/AC-2: same per-line-item serials shape as retrieve
+            # above, but also nesting supplementaries (one level deep,
+            # matching the "active" queryset's nesting) so packing_list()
+            # can consolidate the Primary + every supplementary's line
+            # items into one PDF from a single query per level.
+            line_items_queryset = WorkOrderLineItem.objects.select_related(
+                "product_type"
+            ).prefetch_related(
+                Prefetch(
+                    "serialized_items",
+                    queryset=SerializedItem.objects.order_by("serial_number"),
+                )
+            )
+            return WorkOrder.objects.select_related("created_by").prefetch_related(
+                Prefetch("line_items", queryset=line_items_queryset),
+                Prefetch(
+                    "supplementaries",
+                    queryset=WorkOrder.objects.order_by(
+                        "supplementary_sequence"
+                    ).prefetch_related(
+                        Prefetch("line_items", queryset=line_items_queryset)
+                    ),
+                ),
             )
         queryset = super().get_queryset()
         if self.action in ("scan", "complete", "return_item"):
@@ -537,3 +567,72 @@ class WorkOrderViewSet(
             self._refresh_line_items(work_order, _active_line_items_queryset)
 
         return Response(WorkOrderReturnSerializer(work_order).data, status=200)
+
+    @action(detail=True, methods=["get"], url_path="packing-list")
+    def packing_list(self, request, pk=None):
+        # WRH-34/AC-1/AC-3/AC-4: available from "in_progress" onward - PRD's
+        # listed statuses (in_progress, fulfilled, partially_returned,
+        # returned, closed) are every non-draft status this model can carry
+        # (there is no STATUS_CLOSED yet), so the gate is "not draft" rather
+        # than an explicit allowlist - a future closed status would already
+        # satisfy this with no code change here.
+        # WRH-34/AC-2: only requestable from a Primary WO - it's the one
+        # that consolidates its own + every supplementary's line items;
+        # get_queryset() above shapes this action's queryset accordingly.
+        work_order = self.get_object()
+        if work_order.parent_work_order_id:
+            raise ValidationError(
+                {
+                    "detail": (
+                        "Download the packing list from the Primary work"
+                        " order instead."
+                    )
+                }
+            )
+        if work_order.status == WorkOrder.STATUS_DRAFT:
+            raise ValidationError(
+                {"detail": "Packing list is available once fulfillment has started."}
+            )
+
+        def _section(wo):
+            # WRH-34/AC-1/AC-3: serials "issued" against a line item are
+            # read off work_order_line_item's reverse FK regardless of the
+            # item's current status - matches this repo's existing "current
+            # claim only, no history" design (see SerializedItem
+            # .work_order_line_item's own comment) so a scan reflects
+            # immediately (AC-3) and a later return/damage flag doesn't
+            # retroactively erase it from what was issued (AC-4).
+            return {
+                "reference": _work_order_reference(wo),
+                "job_name": wo.job_name,
+                "client_name": wo.client_name,
+                "expected_date_out": wo.expected_date_out,
+                "line_items": [
+                    {
+                        "product_type_name": line_item.product_type.name,
+                        "quantity": line_item.quantity,
+                        "serial_numbers": [
+                            item.serial_number
+                            for item in line_item.serialized_items.all()
+                        ],
+                    }
+                    for line_item in wo.line_items.all()
+                ],
+            }
+
+        primary_reference = _work_order_reference(work_order)
+        sections = [_section(work_order)] + [
+            _section(supplementary)
+            for supplementary in work_order.supplementaries.all()
+        ]
+        html = render_to_string(
+            "inventory/packing_list_pdf.html",
+            {"primary_reference": primary_reference, "sections": sections},
+        )
+        response = HttpResponse(
+            HTML(string=html).write_pdf(), content_type="application/pdf"
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="packing-list-{primary_reference}.pdf"'
+        )
+        return response

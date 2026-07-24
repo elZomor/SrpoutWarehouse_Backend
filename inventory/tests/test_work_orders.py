@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from django.template.loader import render_to_string
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
@@ -1442,3 +1443,220 @@ class WorkOrderSupplementaryHierarchyTests(TestCase):
         supplementary = WorkOrderFactory(parent_work_order=primary)
 
         supplementary.full_clean()
+
+
+class WorkOrderPackingListTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+
+    def _packing_list(self, work_order):
+        with patch("inventory.views.work_order.HTML") as mock_html_class:
+            mock_html_class.return_value.write_pdf.return_value = b"%PDF-fake"
+            response = self.client.get(
+                reverse("workorder-packing-list", args=[work_order.id])
+            )
+        return response, mock_html_class
+
+    def test_packing_list_for_primary_with_no_supplementaries(self):
+        # TC-01/AC-1: WO reference, job name, client name, date out, and
+        # per line item the product type + requested qty + serials issued.
+        work_order = WorkOrderFactory(
+            job_name="Summer Gala",
+            client_name="Acme Events",
+            expected_date_out="2026-08-01",
+            status=WorkOrder.STATUS_FULFILLED,
+        )
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type, quantity=2
+        )
+        SerializedItemFactory(
+            serial_number="SN-0001",
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+        SerializedItemFactory(
+            serial_number="SN-0002",
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response, mock_html_class = self._packing_list(work_order)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn(
+            f'filename="packing-list-WO-{work_order.id}.pdf"',
+            response["Content-Disposition"],
+        )
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn(f"WO-{work_order.id}", rendered_html)
+        self.assertIn("Summer Gala", rendered_html)
+        self.assertIn("Acme Events", rendered_html)
+        self.assertIn("2026-08-01", rendered_html)
+        self.assertIn(self.product_type.name, rendered_html)
+        self.assertIn("SN-0001", rendered_html)
+        self.assertIn("SN-0002", rendered_html)
+
+    def test_packing_list_consolidates_primary_and_supplementaries(self):
+        # TC-02/AC-2: downloading from the Primary bundles its own +
+        # every supplementary's reference and line items into one PDF.
+        primary = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        supp1 = WorkOrderFactory(
+            parent_work_order=primary,
+            supplementary_sequence=1,
+            status=WorkOrder.STATUS_FULFILLED,
+        )
+        supp2 = WorkOrderFactory(
+            parent_work_order=primary,
+            supplementary_sequence=2,
+            status=WorkOrder.STATUS_FULFILLED,
+        )
+        primary_line_item = WorkOrderLineItemFactory(
+            work_order=primary, product_type=self.product_type
+        )
+        supp1_line_item = WorkOrderLineItemFactory(
+            work_order=supp1, product_type=self.product_type
+        )
+        supp2_line_item = WorkOrderLineItemFactory(
+            work_order=supp2, product_type=self.product_type
+        )
+        SerializedItemFactory(
+            serial_number="SN-PRIMARY",
+            product_type=self.product_type,
+            work_order_line_item=primary_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+        SerializedItemFactory(
+            serial_number="SN-SUPP1",
+            product_type=self.product_type,
+            work_order_line_item=supp1_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+        SerializedItemFactory(
+            serial_number="SN-SUPP2",
+            product_type=self.product_type,
+            work_order_line_item=supp2_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response, mock_html_class = self._packing_list(primary)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn(f"WO-{primary.id}", rendered_html)
+        self.assertIn(f"WO-{primary.id}-S1", rendered_html)
+        self.assertIn(f"WO-{primary.id}-S2", rendered_html)
+        self.assertIn("SN-PRIMARY", rendered_html)
+        self.assertIn("SN-SUPP1", rendered_html)
+        self.assertIn("SN-SUPP2", rendered_html)
+
+    def test_packing_list_available_immediately_when_in_progress(self):
+        # TC-03/AC-3: reflects whatever has been scanned so far, even
+        # before the line item's requested quantity is fully reached.
+        work_order = WorkOrderFactory(status=WorkOrder.STATUS_IN_PROGRESS)
+        line_item = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type, quantity=5
+        )
+        SerializedItemFactory(
+            serial_number="SN-SCANNED",
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_RESERVED,
+        )
+
+        response, mock_html_class = self._packing_list(work_order)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn("SN-SCANNED", rendered_html)
+
+    def test_packing_list_downloadable_at_later_statuses(self):
+        # TC-04/AC-4: still generates correctly once fulfilled or returned
+        # (there is no STATUS_CLOSED on this model - see the plan note in
+        # the ticket cache; "not draft" already covers every later status).
+        for later_status in (
+            WorkOrder.STATUS_FULFILLED,
+            WorkOrder.STATUS_PARTIALLY_RETURNED,
+            WorkOrder.STATUS_RETURNED,
+        ):
+            with self.subTest(status=later_status):
+                work_order = WorkOrderFactory(status=later_status)
+
+                response, _ = self._packing_list(work_order)
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_packing_list_lists_serials_under_their_own_line_item(self):
+        # TC-05: each line item's section lists only its own product
+        # type's serials, not another line item's.
+        work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        other_type = ProductTypeFactory()
+        line_item_a = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=self.product_type
+        )
+        line_item_b = WorkOrderLineItemFactory(
+            work_order=work_order, product_type=other_type
+        )
+        SerializedItemFactory(
+            serial_number="SN-TYPE-A",
+            product_type=self.product_type,
+            work_order_line_item=line_item_a,
+            status=SerializedItem.STATUS_OUT,
+        )
+        SerializedItemFactory(
+            serial_number="SN-TYPE-B",
+            product_type=other_type,
+            work_order_line_item=line_item_b,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        with patch("inventory.views.work_order.HTML") as mock_html_class, patch(
+            "inventory.views.work_order.render_to_string",
+            wraps=render_to_string,
+        ) as mock_render:
+            mock_html_class.return_value.write_pdf.return_value = b"%PDF-fake"
+            response = self.client.get(
+                reverse("workorder-packing-list", args=[work_order.id])
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        context = mock_render.call_args.args[1]
+        line_items_by_type = {
+            li["product_type_name"]: li["serial_numbers"]
+            for li in context["sections"][0]["line_items"]
+        }
+        self.assertEqual(line_items_by_type[self.product_type.name], ["SN-TYPE-A"])
+        self.assertEqual(line_items_by_type[other_type.name], ["SN-TYPE-B"])
+
+    def test_packing_list_rejects_draft_work_order(self):
+        work_order = WorkOrderFactory()
+
+        response, _ = self._packing_list(work_order)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Packing list is available once fulfillment has started.",
+        )
+
+    def test_packing_list_rejects_when_requested_on_a_supplementary(self):
+        primary = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        supplementary = WorkOrderFactory(
+            parent_work_order=primary,
+            supplementary_sequence=1,
+            status=WorkOrder.STATUS_FULFILLED,
+        )
+
+        response, _ = self._packing_list(supplementary)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Download the packing list from the Primary work order instead.",
+        )
