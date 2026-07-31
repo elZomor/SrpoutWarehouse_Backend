@@ -4,6 +4,7 @@ import factory
 from django.contrib.auth.models import User
 
 from inventory.models import (
+    Box,
     Category,
     ProductType,
     PurchaseOrder,
@@ -85,6 +86,14 @@ class WorkOrderLineItemFactory(factory.django.DjangoModelFactory):
     work_order = factory.SubFactory(WorkOrderFactory)
     product_type = factory.SubFactory(ProductTypeFactory)
     quantity = 1
+
+
+class BoxFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Box
+
+    code = factory.Sequence(lambda n: f"BX-{n:04d}")
+    product_type = factory.SubFactory(ProductTypeFactory)
 
 
 class TransactionFactory(factory.django.DjangoModelFactory):

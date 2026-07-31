@@ -10,6 +10,7 @@ from rest_framework.test import APITestCase
 
 from inventory.models import SerializedItem, Transaction, WorkOrder
 from inventory.tests.factories import (
+    BoxFactory,
     ProductTypeFactory,
     SerializedItemFactory,
     WorkOrderFactory,
@@ -1660,3 +1661,194 @@ class WorkOrderPackingListTests(APITestCase):
             response.data["detail"],
             "Download the packing list from the Primary work order instead.",
         )
+
+
+class WorkOrderScanBoxTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+        self.work_order = WorkOrderFactory(status=WorkOrder.STATUS_IN_PROGRESS)
+        self.line_item = WorkOrderLineItemFactory(
+            work_order=self.work_order,
+            product_type=self.product_type,
+            quantity=5,
+        )
+
+    def scan_box(self, box_code):
+        return self.client.post(
+            reverse("workorder-scan-box", args=[self.work_order.id]),
+            {"box_code": box_code},
+            format="json",
+        )
+
+    def test_scan_box_reserves_every_item_inside(self):
+        # WRH-26/AC-2/AC-3
+        items = [
+            SerializedItemFactory(product_type=self.product_type) for _ in range(3)
+        ]
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(id__in=[item.id for item in items]).update(
+            box=box
+        )
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["box_summary"]["added"], 3)
+        for item in items:
+            item.refresh_from_db()
+            self.assertEqual(item.status, SerializedItem.STATUS_RESERVED)
+            self.assertEqual(item.work_order_line_item_id, self.line_item.id)
+        line_item_data = next(
+            li
+            for li in response.data["work_order"]["line_items"]
+            if li["id"] == self.line_item.id
+        )
+        self.assertEqual(line_item_data["scanned_quantity"], 3)
+
+    def test_scan_box_reports_an_unavailable_item_without_blocking_the_rest(self):
+        # WRH-26/AC-2: "each validated individually" - one already-out item
+        # doesn't stop its box-mates from being added.
+        available_item = SerializedItemFactory(product_type=self.product_type)
+        out_item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_OUT
+        )
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(id__in=[available_item.id, out_item.id]).update(
+            box=box
+        )
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["box_summary"]["added"], 1)
+        results = {
+            result["serial_number"]: result
+            for result in response.data["box_summary"]["results"]
+        }
+        self.assertTrue(results[available_item.serial_number]["added"])
+        self.assertFalse(results[out_item.serial_number]["added"])
+
+    def test_scan_box_rejects_unknown_box_code(self):
+        response = self.scan_box("BX-DOES-NOT-EXIST")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scan_box_rejects_when_no_line_item_matches_product_type(self):
+        other_product_type = ProductTypeFactory()
+        box = BoxFactory(product_type=other_product_type)
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scan_box_rejects_when_work_order_has_not_been_started(self):
+        self.work_order.status = WorkOrder.STATUS_DRAFT
+        self.work_order.save(update_fields=["status"])
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scan_box_requires_authentication(self):
+        self.client.logout()
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WorkOrderReturnBoxTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+        self.work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        self.line_item = WorkOrderLineItemFactory(
+            work_order=self.work_order,
+            product_type=self.product_type,
+            quantity=2,
+        )
+
+    def return_box(self, box_code):
+        return self.client.post(
+            reverse("workorder-return-box", args=[self.work_order.id]),
+            {"box_code": box_code},
+            format="json",
+        )
+
+    def _out_item(self):
+        return SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+    def test_return_box_returns_every_item_inside_and_marks_wo_returned(self):
+        # WRH-26/AC-2/AC-3
+        items = [self._out_item() for _ in range(2)]
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(id__in=[item.id for item in items]).update(
+            box=box
+        )
+
+        response = self.return_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["box_summary"]["added"], 2)
+        for item in items:
+            item.refresh_from_db()
+            self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+        self.work_order.refresh_from_db()
+        self.assertEqual(self.work_order.status, WorkOrder.STATUS_RETURNED)
+
+    def test_return_box_reports_an_item_not_issued_on_this_wo_without_blocking_rest(
+        self,
+    ):
+        returnable_item = self._out_item()
+        foreign_item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_AVAILABLE
+        )
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(
+            id__in=[returnable_item.id, foreign_item.id]
+        ).update(box=box)
+
+        response = self.return_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = {
+            result["serial_number"]: result
+            for result in response.data["box_summary"]["results"]
+        }
+        self.assertTrue(results[returnable_item.serial_number]["added"])
+        self.assertFalse(results[foreign_item.serial_number]["added"])
+
+    def test_return_box_rejects_unknown_box_code(self):
+        response = self.return_box("BX-DOES-NOT-EXIST")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_return_box_rejects_when_work_order_is_draft(self):
+        self.work_order.status = WorkOrder.STATUS_DRAFT
+        self.work_order.save(update_fields=["status"])
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.return_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_return_box_requires_authentication(self):
+        self.client.logout()
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.return_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
