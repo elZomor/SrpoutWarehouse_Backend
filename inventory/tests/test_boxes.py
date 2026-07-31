@@ -52,6 +52,37 @@ class BoxCreationTests(APITestCase):
         codes = [box["code"] for box in response.data]
         self.assertIn("BX-002", codes)
 
+    def test_create_box_rejects_an_item_already_in_another_box(self):
+        # An item already boxed can't be silently re-assigned into a second
+        # box - Box contents are meant to be set once and never cleared
+        # (SerializedItem.box's own comment); item_ids' box__isnull=True
+        # queryset restriction is what actually enforces that.
+        item = SerializedItemFactory(product_type=self.product_type)
+        first_box_response = self.client.post(
+            reverse("box-list"),
+            {
+                "code": "BX-FIRST",
+                "product_type": self.product_type.id,
+                "item_ids": [item.id],
+            },
+            format="json",
+        )
+        self.assertEqual(first_box_response.status_code, status.HTTP_201_CREATED)
+
+        second_box_response = self.client.post(
+            reverse("box-list"),
+            {
+                "code": "BX-SECOND",
+                "product_type": self.product_type.id,
+                "item_ids": [item.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(second_box_response.status_code, status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        self.assertEqual(item.box.code, "BX-FIRST")
+
     def test_create_box_requires_authentication(self):
         self.client.logout()
 

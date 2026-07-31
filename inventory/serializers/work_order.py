@@ -173,9 +173,9 @@ class WorkOrderSerializer(serializers.ModelSerializer):
 class WorkOrderScanSerializer(serializers.Serializer):
     # Input-only (AC-2): one scanned serial against one line item per call,
     # matching PurchaseOrderReceiveSerializer's identical shape for the same
-    # scan-gun-driven flow. Box-QR scanning (AC-3) needs a Box/Container
-    # model that doesn't exist in this repo yet (PRD Epic 5, unbuilt, same
-    # gap WRH-30 hit) - out of scope here, deferred to WRH-5 alongside it.
+    # scan-gun-driven flow. Box-QR scanning (AC-3) is its own serializer/
+    # action (WorkOrderScanBoxSerializer/WorkOrderViewSet.scan_box(), WRH-26)
+    # rather than an alternate input shape here.
     #
     # Archived product types are excluded the same way
     # WorkOrderLineItemSerializer.product_type restricts them at create time
@@ -231,9 +231,9 @@ class WorkOrderReturnScanSerializer(serializers.Serializer):
     # Input-only (AC-1/AC-2/AC-4): one scanned serial per call against
     # whichever line item it was originally issued against - matches
     # WorkOrderScanSerializer's identical scan-gun-driven shape. Box-QR
-    # return (AC-3 of WRH-38) needs a Box/Container model that doesn't exist
-    # in this repo yet (PRD Epic 5, unbuilt, same gap WRH-30/WRH-54 hit) -
-    # deferred to WRH-5 alongside them.
+    # return (AC-3 of WRH-38) is its own serializer/action
+    # (WorkOrderReturnBoxSerializer/WorkOrderViewSet.return_box(), WRH-26)
+    # rather than an alternate input shape here.
     serial_number = serializers.CharField(
         error_messages={
             "blank": "Serial number is required.",

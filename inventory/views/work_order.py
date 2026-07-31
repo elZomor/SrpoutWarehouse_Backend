@@ -279,7 +279,8 @@ class WorkOrderViewSet(
         # AC-2: a scanned serial is validated (exists, correct product
         # type, status available) and claimed against the target line item,
         # advancing that line item's live counter. Box-QR scanning (AC-3)
-        # is out of scope - see WorkOrderScanSerializer's comment.
+        # is the separate scan_box() action below, not an alternate input
+        # shape here.
         work_order = self.get_object()
         if work_order.status != WorkOrder.STATUS_IN_PROGRESS:
             raise ValidationError(
@@ -371,12 +372,14 @@ class WorkOrderViewSet(
         # WRH-26/AC-2/AC-3: scanning a Box's code expands to every item
         # inside in one call, each validated and claimed against the WO's
         # line item matching the box's product type - same
-        # available/quantity-cap checks scan() applies to a single serial
-        # (a product-type mismatch can't happen per-item here, since a box
-        # is itself scoped to one product type at creation), just looped so
-        # one item's rejection doesn't block its box-mates. Receive-context
-        # box scanning is out of scope - see WorkOrderScanBoxSerializer's
-        # comment.
+        # available/quantity-cap/product-type/archived checks scan() applies
+        # to a single serial, just looped so one item's rejection doesn't
+        # block its box-mates. A box's own items aren't yet guaranteed to
+        # all share its declared product_type (that guarantee is WRH-27's
+        # AC-1, not built here) - the per-item product-type check below is
+        # what scan_box() relies on instead of trusting that invariant.
+        # Receive-context box scanning is out of scope - see
+        # WorkOrderScanBoxSerializer's comment.
         work_order = self.get_object()
         if work_order.status != WorkOrder.STATUS_IN_PROGRESS:
             raise ValidationError(
@@ -402,14 +405,18 @@ class WorkOrderViewSet(
                 raise ValidationError(
                     {"status": ["Work order fulfillment has not been started."]}
                 )
-            line_item = (
-                WorkOrderLineItem.objects.select_related("product_type")
-                .filter(
-                    work_order_id=work_order.id, product_type_id=box.product_type_id
+            # Matches WorkOrderScanSerializer.line_item's identical
+            # archived-product-type queryset restriction (WRH-21) - a single
+            # scan can't be aimed at an archived-product-type line item, so
+            # neither should a box scan.
+            matching_line_items = list(
+                WorkOrderLineItem.objects.select_related("product_type").filter(
+                    work_order_id=work_order.id,
+                    product_type_id=box.product_type_id,
+                    product_type__archived=False,
                 )
-                .first()
             )
-            if line_item is None:
+            if not matching_line_items:
                 raise ValidationError(
                     {
                         "box_code": [
@@ -418,10 +425,30 @@ class WorkOrderViewSet(
                         ]
                     }
                 )
+            if len(matching_line_items) > 1:
+                # Nothing prevents a WO from having two line items of the
+                # same product type (no such uniqueness constraint exists),
+                # unlike scan() which always takes an explicit line_item id
+                # from the caller - a box scan has no way to say which one
+                # it means, so ask for individual scans instead of silently
+                # picking one.
+                raise ValidationError(
+                    {
+                        "box_code": [
+                            "This work order has more than one line item for"
+                            " the box's product type - scan its items"
+                            " individually instead."
+                        ]
+                    }
+                )
+            line_item = matching_line_items[0]
+            # Computed once, then tracked locally as items are claimed below
+            # - matches _line_items_queryset()'s "one COUNT, not one per
+            # item" convention rather than re-querying inside the loop.
+            scanned_count = SerializedItem.objects.filter(
+                work_order_line_item=line_item
+            ).count()
             for item in box.items.order_by("serial_number"):
-                scanned_count = SerializedItem.objects.filter(
-                    work_order_line_item=line_item
-                ).count()
                 if scanned_count >= line_item.quantity:
                     results.append(
                         {
@@ -437,6 +464,21 @@ class WorkOrderViewSet(
                 # Lock the target SerializedItem row too - matches scan()'s
                 # identical "claimed at most once" guard.
                 locked_item = SerializedItem.objects.select_for_update().get(pk=item.pk)
+                if locked_item.product_type_id != line_item.product_type_id:
+                    # A box isn't yet guaranteed to hold only one product
+                    # type (WRH-27/AC-1) - reject a mismatched item the same
+                    # way scan() rejects one, instead of silently claiming it
+                    # against the wrong line item.
+                    results.append(
+                        {
+                            "serial_number": locked_item.serial_number,
+                            "added": False,
+                            "reason": (
+                                "Item does not match this line item's" " product type."
+                            ),
+                        }
+                    )
+                    continue
                 if locked_item.status != SerializedItem.STATUS_AVAILABLE:
                     results.append(
                         {
@@ -449,6 +491,7 @@ class WorkOrderViewSet(
                 locked_item.status = SerializedItem.STATUS_RESERVED
                 locked_item.work_order_line_item = line_item
                 locked_item.save(update_fields=["status", "work_order_line_item"])
+                scanned_count += 1
                 results.append(
                     {
                         "serial_number": locked_item.serial_number,
@@ -545,8 +588,8 @@ class WorkOrderViewSet(
         # "returned", otherwise "partially_returned" - re-scanning a
         # partially_returned WO's remaining items (AC-4) reuses this same
         # action, no separate "reopen" step needed. Box-QR return (AC-3 of
-        # WRH-38) needs a Box/Container model that doesn't exist yet -
-        # deferred to WRH-5 (see WorkOrderReturnScanSerializer's comment).
+        # WRH-38) is the separate return_box() action below, not an
+        # alternate input shape here.
         # WRH-39/AC-6: an item already flagged damaged is reflected as-is
         # (see the STATUS_DAMAGED branch below) rather than rejected
         # outright. WRH-57/AC-1: the same scan can instead flag the unit as

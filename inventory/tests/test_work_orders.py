@@ -1762,6 +1762,89 @@ class WorkOrderScanBoxTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_scan_box_rejects_an_item_whose_actual_product_type_differs_from_the_box(
+        self,
+    ):
+        # WRH-27/AC-1 isn't built yet, so a box's own items aren't
+        # guaranteed to match its declared product_type at this data layer
+        # (e.g. pre-existing data, admin-created boxes) - scan_box() must
+        # not trust that invariant, matching scan()'s identical per-item
+        # check.
+        matching_item = SerializedItemFactory(product_type=self.product_type)
+        mismatched_item = SerializedItemFactory(product_type=ProductTypeFactory())
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(
+            id__in=[matching_item.id, mismatched_item.id]
+        ).update(box=box)
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["box_summary"]["added"], 1)
+        results = {
+            result["serial_number"]: result
+            for result in response.data["box_summary"]["results"]
+        }
+        self.assertTrue(results[matching_item.serial_number]["added"])
+        self.assertFalse(results[mismatched_item.serial_number]["added"])
+        mismatched_item.refresh_from_db()
+        self.assertEqual(mismatched_item.status, SerializedItem.STATUS_AVAILABLE)
+
+    def test_scan_box_rejects_when_the_matching_line_items_product_type_is_archived(
+        self,
+    ):
+        # Matches WorkOrderScanSerializer.line_item's identical archived-
+        # product-type restriction (WRH-21) - a box scan shouldn't be able
+        # to claim against a line item a single scan() would reject.
+        self.product_type.archived = True
+        self.product_type.save(update_fields=["archived"])
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scan_box_rejects_when_two_line_items_share_the_boxs_product_type(self):
+        # scan_box() has no way to ask the caller which of two same-
+        # product-type line items it means (unlike scan(), which always
+        # takes an explicit line_item id) - it must refuse rather than
+        # silently picking one.
+        WorkOrderLineItemFactory(
+            work_order=self.work_order,
+            product_type=self.product_type,
+            quantity=2,
+        )
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scan_box_stops_adding_once_the_line_items_quantity_cap_is_reached(self):
+        # AC-2/AC-4: matches scan()'s identical
+        # test_scan_rejects_scan_past_requested_quantity boundary, applied to
+        # a box scan claiming multiple items in one call - self.line_item's
+        # quantity is 5, so a 6-item box should add exactly 5 and reject the
+        # 6th on the cap, not silently over-claim.
+        items = [
+            SerializedItemFactory(product_type=self.product_type) for _ in range(6)
+        ]
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(id__in=[item.id for item in items]).update(
+            box=box
+        )
+
+        response = self.scan_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["box_summary"]["added"], 5)
+        results = response.data["box_summary"]["results"]
+        added_count = sum(1 for result in results if result["added"])
+        rejected = [result for result in results if not result["added"]]
+        self.assertEqual(added_count, 5)
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("requested quantity", rejected[0]["reason"])
+
 
 class WorkOrderReturnBoxTests(APITestCase):
     def setUp(self):

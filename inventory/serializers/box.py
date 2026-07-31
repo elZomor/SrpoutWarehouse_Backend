@@ -34,11 +34,21 @@ class BoxSerializer(serializers.ModelSerializer):
     # field names sharing one underlying relation, one for each direction,
     # so a submitted id list never collides with the returned nested
     # summary in either the request or response payload.
+    # box__isnull=True: an item already in another box can't be silently
+    # re-assigned into this one - Box.items is meant to be set once and
+    # never cleared (see SerializedItem.box's own comment), so this
+    # queryset restriction is what actually enforces that instead of the
+    # unconditional bulk update in create() below doing it implicitly.
     item_ids = serializers.PrimaryKeyRelatedField(
-        queryset=SerializedItem.objects.all(),
+        queryset=SerializedItem.objects.filter(box__isnull=True),
         many=True,
         write_only=True,
         source="items",
+        error_messages={
+            "does_not_exist": (
+                "Select an item that exists and is not already in another box."
+            ),
+        },
     )
     items = BoxItemSerializer(many=True, read_only=True)
 
