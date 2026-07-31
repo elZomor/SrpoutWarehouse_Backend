@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from inventory.models import (
+    Box,
     Category,
     ProductType,
     PurchaseOrder,
@@ -28,9 +29,16 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(SerializedItem)
 class SerializedItemAdmin(admin.ModelAdmin):
-    list_display = ("serial_number", "product_type", "status", "serial")
+    list_display = ("serial_number", "product_type", "status", "serial", "box")
     list_filter = ("status", "product_type")
     search_fields = SerializedItem.SEARCH_FIELDS
+
+
+@admin.register(Box)
+class BoxAdmin(admin.ModelAdmin):
+    list_display = ("code", "product_type", "uuid")
+    list_filter = ("product_type",)
+    search_fields = ("code",)
 
 
 class PurchaseOrderLineItemInline(admin.TabularInline):

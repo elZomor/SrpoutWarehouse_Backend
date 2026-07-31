@@ -5,6 +5,7 @@ from django.db import models
 
 import qrcode
 
+from inventory.models.box import Box
 from inventory.models.product_type import ProductType
 from inventory.models.purchase_order_line_item import PurchaseOrderLineItem
 from inventory.models.work_order_line_item import WorkOrderLineItem
@@ -67,6 +68,20 @@ class SerializedItem(models.Model):
         WorkOrderLineItem,
         on_delete=models.PROTECT,
         related_name="serialized_items",
+        null=True,
+        blank=True,
+    )
+    # WRH-26/AC-1: set when this item is registered into a Box at box-
+    # creation time (BoxSerializer.create()) - null for an item never
+    # boxed. PROTECT for the same "shouldn't vanish out from under it"
+    # reason as the other claim FKs above; box contents are fixed after
+    # creation (PRD v0.5 §2.2 Out of Scope), so nothing ever clears this
+    # once set - matches work_order_line_item's identical "current claim
+    # only, no history" design.
+    box = models.ForeignKey(
+        Box,
+        on_delete=models.PROTECT,
+        related_name="items",
         null=True,
         blank=True,
     )

@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from inventory.views import (
+    BoxViewSet,
     CategoryViewSet,
     LoginView,
     LogoutView,
@@ -20,6 +21,7 @@ router.register("serialized-items", SerializedItemViewSet)
 router.register("purchase-orders", PurchaseOrderViewSet)
 router.register("work-orders", WorkOrderViewSet)
 router.register("transactions", TransactionViewSet)
+router.register("boxes", BoxViewSet)
 
 urlpatterns = [
     path("auth/login/", LoginView.as_view(), name="login"),

@@ -10,7 +10,13 @@ from rest_framework.response import Response
 
 from weasyprint import HTML
 
-from inventory.models import SerializedItem, Transaction, WorkOrder, WorkOrderLineItem
+from inventory.models import (
+    Box,
+    SerializedItem,
+    Transaction,
+    WorkOrder,
+    WorkOrderLineItem,
+)
 from inventory.models.work_order import (
     DAMAGED_COUNT_ANNOTATION,
     RETURNED_COUNT_ANNOTATION,
@@ -20,8 +26,10 @@ from inventory.models.work_order import (
 from inventory.serializers import (
     WorkOrderActiveSerializer,
     WorkOrderDetailSerializer,
+    WorkOrderReturnBoxSerializer,
     WorkOrderReturnScanSerializer,
     WorkOrderReturnSerializer,
+    WorkOrderScanBoxSerializer,
     WorkOrderScanSerializer,
     WorkOrderSerializer,
 )
@@ -195,7 +203,13 @@ class WorkOrderViewSet(
                 ),
             )
         queryset = super().get_queryset()
-        if self.action in ("scan", "complete", "return_item"):
+        if self.action in (
+            "scan",
+            "scan_box",
+            "complete",
+            "return_item",
+            "return_box",
+        ):
             # Both actions build their own fresh, request-scoped query for
             # their response (see below) and never read the prefetched
             # line_items from self.get_object() - matches
@@ -265,7 +279,8 @@ class WorkOrderViewSet(
         # AC-2: a scanned serial is validated (exists, correct product
         # type, status available) and claimed against the target line item,
         # advancing that line item's live counter. Box-QR scanning (AC-3)
-        # is out of scope - see WorkOrderScanSerializer's comment.
+        # is the separate scan_box() action below, not an alternate input
+        # shape here.
         work_order = self.get_object()
         if work_order.status != WorkOrder.STATUS_IN_PROGRESS:
             raise ValidationError(
@@ -352,6 +367,153 @@ class WorkOrderViewSet(
 
         return Response(WorkOrderSerializer(work_order).data, status=201)
 
+    @action(detail=True, methods=["post"], url_path="scan-box")
+    def scan_box(self, request, pk=None):
+        # WRH-26/AC-2/AC-3: scanning a Box's code expands to every item
+        # inside in one call, each validated and claimed against the WO's
+        # line item matching the box's product type - same
+        # available/quantity-cap/product-type/archived checks scan() applies
+        # to a single serial, just looped so one item's rejection doesn't
+        # block its box-mates. A box's own items aren't yet guaranteed to
+        # all share its declared product_type (that guarantee is WRH-27's
+        # AC-1, not built here) - the per-item product-type check below is
+        # what scan_box() relies on instead of trusting that invariant.
+        # Receive-context box scanning is out of scope - see
+        # WorkOrderScanBoxSerializer's comment.
+        work_order = self.get_object()
+        if work_order.status != WorkOrder.STATUS_IN_PROGRESS:
+            raise ValidationError(
+                {"status": ["Work order fulfillment has not been started."]}
+            )
+
+        serializer = WorkOrderScanBoxSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        box_code = serializer.validated_data["box_code"]
+
+        try:
+            box = Box.objects.select_related("product_type").get(code=box_code)
+        except Box.DoesNotExist:
+            raise ValidationError({"box_code": ["Box not found"]})
+
+        results = []
+        with transaction.atomic():
+            # Lock the parent WorkOrder row - same reasoning as scan()'s
+            # identical lock, since every item below is claimed against
+            # this WO's line items.
+            work_order = WorkOrder.objects.select_for_update().get(pk=work_order.pk)
+            if work_order.status != WorkOrder.STATUS_IN_PROGRESS:
+                raise ValidationError(
+                    {"status": ["Work order fulfillment has not been started."]}
+                )
+            # Matches WorkOrderScanSerializer.line_item's identical
+            # archived-product-type queryset restriction (WRH-21) - a single
+            # scan can't be aimed at an archived-product-type line item, so
+            # neither should a box scan.
+            matching_line_items = list(
+                WorkOrderLineItem.objects.select_related("product_type").filter(
+                    work_order_id=work_order.id,
+                    product_type_id=box.product_type_id,
+                    product_type__archived=False,
+                )
+            )
+            if not matching_line_items:
+                raise ValidationError(
+                    {
+                        "box_code": [
+                            "This work order has no line item for the box's"
+                            " product type."
+                        ]
+                    }
+                )
+            if len(matching_line_items) > 1:
+                # Nothing prevents a WO from having two line items of the
+                # same product type (no such uniqueness constraint exists),
+                # unlike scan() which always takes an explicit line_item id
+                # from the caller - a box scan has no way to say which one
+                # it means, so ask for individual scans instead of silently
+                # picking one.
+                raise ValidationError(
+                    {
+                        "box_code": [
+                            "This work order has more than one line item for"
+                            " the box's product type - scan its items"
+                            " individually instead."
+                        ]
+                    }
+                )
+            line_item = matching_line_items[0]
+            # Computed once, then tracked locally as items are claimed below
+            # - matches _line_items_queryset()'s "one COUNT, not one per
+            # item" convention rather than re-querying inside the loop.
+            scanned_count = SerializedItem.objects.filter(
+                work_order_line_item=line_item
+            ).count()
+            for item in box.items.order_by("serial_number"):
+                if scanned_count >= line_item.quantity:
+                    results.append(
+                        {
+                            "serial_number": item.serial_number,
+                            "added": False,
+                            "reason": (
+                                "This line item has already reached its"
+                                " requested quantity."
+                            ),
+                        }
+                    )
+                    continue
+                # Lock the target SerializedItem row too - matches scan()'s
+                # identical "claimed at most once" guard.
+                locked_item = SerializedItem.objects.select_for_update().get(pk=item.pk)
+                if locked_item.product_type_id != line_item.product_type_id:
+                    # A box isn't yet guaranteed to hold only one product
+                    # type (WRH-27/AC-1) - reject a mismatched item the same
+                    # way scan() rejects one, instead of silently claiming it
+                    # against the wrong line item.
+                    results.append(
+                        {
+                            "serial_number": locked_item.serial_number,
+                            "added": False,
+                            "reason": (
+                                "Item does not match this line item's" " product type."
+                            ),
+                        }
+                    )
+                    continue
+                if locked_item.status != SerializedItem.STATUS_AVAILABLE:
+                    results.append(
+                        {
+                            "serial_number": locked_item.serial_number,
+                            "added": False,
+                            "reason": _unavailable_item_message(locked_item),
+                        }
+                    )
+                    continue
+                locked_item.status = SerializedItem.STATUS_RESERVED
+                locked_item.work_order_line_item = line_item
+                locked_item.save(update_fields=["status", "work_order_line_item"])
+                scanned_count += 1
+                results.append(
+                    {
+                        "serial_number": locked_item.serial_number,
+                        "added": True,
+                        "reason": "",
+                    }
+                )
+
+            self._refresh_line_items(work_order)
+
+        return Response(
+            {
+                "work_order": WorkOrderSerializer(work_order).data,
+                "box_summary": {
+                    "code": box.code,
+                    "added": sum(1 for result in results if result["added"]),
+                    "results": results,
+                },
+            },
+            status=201,
+        )
+
     @action(detail=True, methods=["post"])
     def complete(self, request, pk=None):
         # AC-4/AC-5: once every line item has reached its requested
@@ -426,8 +588,8 @@ class WorkOrderViewSet(
         # "returned", otherwise "partially_returned" - re-scanning a
         # partially_returned WO's remaining items (AC-4) reuses this same
         # action, no separate "reopen" step needed. Box-QR return (AC-3 of
-        # WRH-38) needs a Box/Container model that doesn't exist yet -
-        # deferred to WRH-5 (see WorkOrderReturnScanSerializer's comment).
+        # WRH-38) is the separate return_box() action below, not an
+        # alternate input shape here.
         # WRH-39/AC-6: an item already flagged damaged is reflected as-is
         # (see the STATUS_DAMAGED branch below) rather than rejected
         # outright. WRH-57/AC-1: the same scan can instead flag the unit as
@@ -535,38 +697,148 @@ class WorkOrderViewSet(
                 user=request.user,
             )
 
-            # Matches RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's
-            # definition (still out = anything but available or damaged -
-            # WRH-57/AC-3) so a missing item doesn't silently vanish from
-            # this count instead of keeping the WO at partially_returned,
-            # while a damaged one no longer keeps the WO out of "returned"
-            # either. Safe as a plain unlocked .count() only because the
-            # parent WorkOrder row is already locked above - every
-            # status-mutating action on this WO (start/scan/complete/
-            # return_item) takes that same lock first, so concurrent
-            # writers against this WO's items are already serialized by the
-            # time this line runs.
-            still_out = (
-                SerializedItem.objects.filter(
-                    work_order_line_item__work_order_id=work_order.id
-                )
-                .exclude(
-                    status__in=[
-                        SerializedItem.STATUS_AVAILABLE,
-                        SerializedItem.STATUS_DAMAGED,
-                    ]
-                )
-                .count()
-            )
-            work_order.status = (
-                WorkOrder.STATUS_RETURNED
-                if still_out == 0
-                else WorkOrder.STATUS_PARTIALLY_RETURNED
-            )
-            work_order.save(update_fields=["status"])
-            self._refresh_line_items(work_order, _active_line_items_queryset)
+            self._finalize_return_status(work_order)
 
         return Response(WorkOrderReturnSerializer(work_order).data, status=200)
+
+    def _finalize_return_status(self, work_order):
+        # Matches RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's
+        # definition (still out = anything but available or damaged -
+        # WRH-57/AC-3) so a missing item doesn't silently vanish from this
+        # count instead of keeping the WO at partially_returned, while a
+        # damaged one no longer keeps the WO out of "returned" either. Safe
+        # as a plain unlocked .count() only because the parent WorkOrder row
+        # is already locked by the caller - every status-mutating action on
+        # this WO (start/scan/complete/return_item/return_box) takes that
+        # same lock first, so concurrent writers against this WO's items are
+        # already serialized by the time this runs. Shared by return_item()
+        # and return_box() (WRH-26) so both stay on one recompute.
+        still_out = (
+            SerializedItem.objects.filter(
+                work_order_line_item__work_order_id=work_order.id
+            )
+            .exclude(
+                status__in=[
+                    SerializedItem.STATUS_AVAILABLE,
+                    SerializedItem.STATUS_DAMAGED,
+                ]
+            )
+            .count()
+        )
+        work_order.status = (
+            WorkOrder.STATUS_RETURNED
+            if still_out == 0
+            else WorkOrder.STATUS_PARTIALLY_RETURNED
+        )
+        work_order.save(update_fields=["status"])
+        self._refresh_line_items(work_order, _active_line_items_queryset)
+
+    @action(detail=True, methods=["post"], url_path="return-box")
+    def return_box(self, request, pk=None):
+        # WRH-26/AC-2/AC-3: return-context counterpart to scan_box() above -
+        # every item in the box currently out on this WO is returned in one
+        # call, each validated individually so one item's rejection doesn't
+        # block its box-mates. No damaged-flag support here (WRH-57's
+        # damaged=True is a single-item-scan-only refinement, not part of
+        # this ticket's scope).
+        work_order = self.get_object()
+        if work_order.status not in RETURN_ELIGIBLE_STATUSES:
+            raise ValidationError(
+                {"status": ["Work order is not eligible for return."]}
+            )
+
+        serializer = WorkOrderReturnBoxSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        box_code = serializer.validated_data["box_code"]
+
+        try:
+            box = Box.objects.get(code=box_code)
+        except Box.DoesNotExist:
+            raise ValidationError({"box_code": ["Box not found"]})
+
+        results = []
+        with transaction.atomic():
+            work_order = WorkOrder.objects.select_for_update().get(pk=work_order.pk)
+            if work_order.status not in RETURN_ELIGIBLE_STATUSES:
+                raise ValidationError(
+                    {"status": ["Work order is not eligible for return."]}
+                )
+
+            for item in box.items.order_by("serial_number"):
+                locked_item = (
+                    SerializedItem.objects.select_for_update()
+                    .select_related("work_order_line_item")
+                    .get(pk=item.pk)
+                )
+                if (
+                    locked_item.work_order_line_item_id is None
+                    or locked_item.work_order_line_item.work_order_id != work_order.id
+                ):
+                    results.append(
+                        {
+                            "serial_number": locked_item.serial_number,
+                            "added": False,
+                            "reason": (
+                                f"{locked_item.serial_number} was not issued on"
+                                f" WO-{work_order.id}"
+                            ),
+                        }
+                    )
+                    continue
+                if locked_item.status == SerializedItem.STATUS_DAMAGED:
+                    # Matches return_item()'s identical no-op reflection of
+                    # an already-damaged item.
+                    results.append(
+                        {
+                            "serial_number": locked_item.serial_number,
+                            "added": True,
+                            "reason": "",
+                        }
+                    )
+                    continue
+                if locked_item.status != SerializedItem.STATUS_OUT:
+                    results.append(
+                        {
+                            "serial_number": locked_item.serial_number,
+                            "added": False,
+                            "reason": (
+                                f"{locked_item.serial_number} is not currently"
+                                " out on this work order"
+                            ),
+                        }
+                    )
+                    continue
+
+                locked_item.status = SerializedItem.STATUS_AVAILABLE
+                locked_item.save(update_fields=["status"])
+                Transaction.objects.create(
+                    transaction_type=Transaction.TYPE_RETURN,
+                    serialized_item=locked_item,
+                    work_order=work_order,
+                    reference_number=f"WO-{work_order.id}",
+                    user=request.user,
+                )
+                results.append(
+                    {
+                        "serial_number": locked_item.serial_number,
+                        "added": True,
+                        "reason": "",
+                    }
+                )
+
+            self._finalize_return_status(work_order)
+
+        return Response(
+            {
+                "work_order": WorkOrderReturnSerializer(work_order).data,
+                "box_summary": {
+                    "code": box.code,
+                    "added": sum(1 for result in results if result["added"]),
+                    "results": results,
+                },
+            },
+            status=200,
+        )
 
     @action(detail=True, methods=["get"], url_path="packing-list")
     def packing_list(self, request, pk=None):
