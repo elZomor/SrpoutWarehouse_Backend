@@ -114,18 +114,49 @@ class BoxSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items = validated_data.pop("items")
-        product_type = validated_data["product_type"]
         # Both writes must land together - matches WorkOrderSerializer
         # .create()'s identical reasoning for its own two-step nested write.
         with transaction.atomic():
-            # Lock the candidate item rows and re-validate - validate()'s
-            # check above ran before any lock was held, so a concurrent
-            # request could box/change the status of one of these items in
-            # between. select_related avoids an N+1 on item.box.code above.
+            # Re-check the archived guard post-lock too, not just the item
+            # guards below - WRH-56 hit exactly this gap on
+            # PurchaseOrderReceiveSerializer (product_type.archived checked
+            # once pre-lock, a concurrent archive() in the window before
+            # the lock slipped through) and its lesson generalizes: every
+            # guard evaluated in the same pre-lock window needs the same
+            # re-check once one of them gets a lock, not just the one that
+            # motivated adding it.
+            product_type = ProductType.objects.select_for_update().get(
+                pk=validated_data["product_type"].pk
+            )
+            if product_type.archived:
+                raise serializers.ValidationError(
+                    {
+                        "product_type": [
+                            "Select a product type that exists and is not archived."
+                        ]
+                    }
+                )
+            # Lock the candidate item rows (order_by pins a deterministic
+            # acquisition order across concurrent create() calls with
+            # overlapping item pks, avoiding a lock-order deadlock -
+            # matches scan_box()/return_box()'s identical
+            # box.items.order_by("serial_number") when locking more than
+            # one SerializedItem row in the same transaction) and
+            # re-validate - validate()'s check above ran before any lock
+            # was held, so a concurrent request could box/change the status
+            # of one of these items in between. No select_related("box")
+            # here even though _validate_item reads item.box.code on the
+            # "already boxed" branch: SerializedItem.box is nullable, and
+            # on Postgres SELECT ... FOR UPDATE can't be applied across the
+            # resulting LEFT OUTER JOIN ("FOR UPDATE cannot be applied to
+            # the nullable side of an outer join") - it would raise
+            # NotSupportedError on every call, since box IS NULL is exactly
+            # the normal case for a boxable item. The lazy follow-up query
+            # only fires on that one rejection branch, not per item.
             locked_items = list(
-                SerializedItem.objects.select_related("box")
-                .select_for_update()
+                SerializedItem.objects.select_for_update()
                 .filter(pk__in=[item.pk for item in items])
+                .order_by("serial_number")
             )
             for item in locked_items:
                 self._validate_item(item, product_type)

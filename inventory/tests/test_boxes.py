@@ -1,9 +1,11 @@
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from inventory.models import Box
+from inventory.models import Box, ProductType
 from inventory.tests.factories import (
     BoxFactory,
     ProductTypeFactory,
@@ -155,6 +157,41 @@ class BoxCreationTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["item_ids"], ["Select at least one item."])
+
+    def test_create_box_rechecks_archived_status_after_lock_is_acquired(self):
+        # BoxSerializer.product_type's queryset filter only catches an
+        # already-archived product type - it can't catch one archived in
+        # the window between that validation and create()'s
+        # select_for_update()-guarded re-fetch. Simulate a concurrent
+        # archive landing in exactly that window by hooking create()'s one
+        # select_for_update() call site directly on ProductType's manager,
+        # matching PurchaseOrderReceiveSerializer's identical regression
+        # test (WRH-56) for the same guard shape.
+        item = SerializedItemFactory(product_type=self.product_type)
+        original_select_for_update = ProductType.objects.select_for_update
+        product_type = self.product_type
+
+        def archive_then_lock(*args, **kwargs):
+            product_type.archived = True
+            product_type.save(update_fields=["archived"])
+            return original_select_for_update(*args, **kwargs)
+
+        with patch.object(ProductType.objects, "select_for_update", archive_then_lock):
+            response = self.client.post(
+                reverse("box-list"),
+                {
+                    "code": "BX-RACE",
+                    "product_type": self.product_type.id,
+                    "item_ids": [item.id],
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("product_type", response.data)
+        self.assertFalse(Box.objects.filter(code="BX-RACE").exists())
+        item.refresh_from_db()
+        self.assertIsNone(item.box)
 
     def test_create_box_requires_authentication(self):
         self.client.logout()
