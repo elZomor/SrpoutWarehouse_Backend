@@ -374,12 +374,12 @@ class WorkOrderViewSet(
         # line item matching the box's product type - same
         # available/quantity-cap/product-type/archived checks scan() applies
         # to a single serial, just looped so one item's rejection doesn't
-        # block its box-mates. A box's own items aren't yet guaranteed to
-        # all share its declared product_type (that guarantee is WRH-27's
-        # AC-1, not built here) - the per-item product-type check below is
-        # what scan_box() relies on instead of trusting that invariant.
-        # Receive-context box scanning is out of scope - see
-        # WorkOrderScanBoxSerializer's comment.
+        # block its box-mates. BoxSerializer now guarantees every item in a
+        # box shares its declared product_type (WRH-27/AC-1), but the
+        # per-item check below is kept anyway as defense in depth rather
+        # than trusting that invariant transitively. Receive-context box
+        # scanning is out of scope - see WorkOrderScanBoxSerializer's
+        # comment.
         work_order = self.get_object()
         if work_order.status != WorkOrder.STATUS_IN_PROGRESS:
             raise ValidationError(
@@ -465,7 +465,8 @@ class WorkOrderViewSet(
                 # identical "claimed at most once" guard.
                 locked_item = SerializedItem.objects.select_for_update().get(pk=item.pk)
                 if locked_item.product_type_id != line_item.product_type_id:
-                    # A box isn't yet guaranteed to hold only one product
+                    # Defense in depth, not reachable in practice now that
+                    # BoxSerializer guarantees a box holds only one product
                     # type (WRH-27/AC-1) - reject a mismatched item the same
                     # way scan() rejects one, instead of silently claiming it
                     # against the wrong line item.
