@@ -53,10 +53,9 @@ class BoxCreationTests(APITestCase):
         self.assertIn("BX-002", codes)
 
     def test_create_box_rejects_an_item_already_in_another_box(self):
-        # An item already boxed can't be silently re-assigned into a second
-        # box - Box contents are meant to be set once and never cleared
-        # (SerializedItem.box's own comment); item_ids' box__isnull=True
-        # queryset restriction is what actually enforces that.
+        # TC-02/AC-2: an item already boxed can't be silently re-assigned
+        # into a second box - Box contents are meant to be set once and
+        # never cleared (SerializedItem.box's own comment).
         item = SerializedItemFactory(product_type=self.product_type)
         first_box_response = self.client.post(
             reverse("box-list"),
@@ -80,8 +79,82 @@ class BoxCreationTests(APITestCase):
         )
 
         self.assertEqual(second_box_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            second_box_response.data["item_ids"],
+            [f"{item.serial_number} is already in box BX-FIRST"],
+        )
         item.refresh_from_db()
         self.assertEqual(item.box.code, "BX-FIRST")
+
+    def test_create_box_rejects_an_item_of_a_different_product_type(self):
+        # TC-01/AC-1
+        other_product_type = ProductTypeFactory()
+        item = SerializedItemFactory(product_type=other_product_type)
+
+        response = self.client.post(
+            reverse("box-list"),
+            {
+                "code": "BX-004",
+                "product_type": self.product_type.id,
+                "item_ids": [item.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_ids"],
+            [f"{item.serial_number} does not match this box's product type"],
+        )
+        self.assertFalse(Box.objects.filter(code="BX-004").exists())
+
+    def test_create_box_rejects_a_non_available_item(self):
+        # TC-05/AC-5
+        item = SerializedItemFactory(product_type=self.product_type, status="out")
+
+        response = self.client.post(
+            reverse("box-list"),
+            {
+                "code": "BX-005",
+                "product_type": self.product_type.id,
+                "item_ids": [item.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_ids"],
+            [f"{item.serial_number} is not available to box"],
+        )
+
+    def test_create_box_requires_a_box_code(self):
+        # TC-03/AC-3
+        item = SerializedItemFactory(product_type=self.product_type)
+
+        response = self.client.post(
+            reverse("box-list"),
+            {
+                "code": "",
+                "product_type": self.product_type.id,
+                "item_ids": [item.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], ["Box code is required."])
+
+    def test_create_box_requires_at_least_one_item(self):
+        # TC-04/AC-4
+        response = self.client.post(
+            reverse("box-list"),
+            {"code": "BX-006", "product_type": self.product_type.id, "item_ids": []},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["item_ids"], ["Select at least one item."])
 
     def test_create_box_requires_authentication(self):
         self.client.logout()
