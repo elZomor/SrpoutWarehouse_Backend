@@ -861,19 +861,15 @@ class WorkOrderViewSet(
         # (there is no STATUS_CLOSED yet), so the gate is "not draft" rather
         # than an explicit allowlist - a future closed status would already
         # satisfy this with no code change here.
-        # WRH-34/AC-2: only requestable from a Primary WO - it's the one
-        # that consolidates its own + every supplementary's line items;
-        # get_queryset() above shapes this action's queryset accordingly.
+        # WRH-35/AC-2: requested on a supplementary directly - resolve to its
+        # Primary and generate the identical consolidated document, rather
+        # than rejecting (WRH-34's original behavior). Re-fetched through
+        # get_queryset() so the Primary row carries the same
+        # supplementaries+line_items prefetch shape the code below expects,
+        # regardless of which row this action was entered on.
         work_order = self.get_object()
         if work_order.parent_work_order_id:
-            raise ValidationError(
-                {
-                    "detail": (
-                        "Download the packing list from the Primary work"
-                        " order instead."
-                    )
-                }
-            )
+            work_order = self.get_queryset().get(pk=work_order.parent_work_order_id)
         if work_order.status == WorkOrder.STATUS_DRAFT:
             raise ValidationError(
                 {"detail": "Packing list is available once fulfillment has started."}
