@@ -1914,6 +1914,39 @@ class WorkOrderReturnBoxTests(APITestCase):
         self.assertTrue(results[returnable_item.serial_number]["added"])
         self.assertFalse(results[foreign_item.serial_number]["added"])
 
+    def test_return_box_flags_an_already_damaged_item_without_counting_it_as_returned(
+        self,
+    ):
+        # WRH-28/AC-3/TC-05: a box-mate externally marked damaged mid-box
+        # must be flagged (not silently folded into the returned count) and
+        # left untouched, while the rest of the box returns normally.
+        returnable_item = self._out_item()
+        damaged_item = self._out_item()
+        damaged_item.status = SerializedItem.STATUS_DAMAGED
+        damaged_item.save(update_fields=["status"])
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(
+            id__in=[returnable_item.id, damaged_item.id]
+        ).update(box=box)
+
+        response = self.return_box(box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["box_summary"]["added"], 1)
+        results = {
+            result["serial_number"]: result
+            for result in response.data["box_summary"]["results"]
+        }
+        self.assertTrue(results[returnable_item.serial_number]["added"])
+        self.assertFalse(results[damaged_item.serial_number]["added"])
+        self.assertIn(
+            damaged_item.serial_number, results[damaged_item.serial_number]["reason"]
+        )
+        returnable_item.refresh_from_db()
+        damaged_item.refresh_from_db()
+        self.assertEqual(returnable_item.status, SerializedItem.STATUS_AVAILABLE)
+        self.assertEqual(damaged_item.status, SerializedItem.STATUS_DAMAGED)
+
     def test_return_box_rejects_unknown_box_code(self):
         response = self.return_box("BX-DOES-NOT-EXIST")
 

@@ -766,11 +766,15 @@ class WorkOrderViewSet(
                 )
 
             for item in box.items.order_by("serial_number"):
-                locked_item = (
-                    SerializedItem.objects.select_for_update()
-                    .select_related("work_order_line_item")
-                    .get(pk=item.pk)
-                )
+                # WRH-28: no select_related("work_order_line_item") here -
+                # that FK is nullable, so pairing it with select_for_update()
+                # produces a LEFT OUTER JOIN Postgres refuses to lock ("FOR
+                # UPDATE cannot be applied to the nullable side of an outer
+                # join"), invisible on this repo's SQLite-backed CI. The
+                # lazy follow-up query below only fires on the rare
+                # not-issued-on-this-WO rejection path, matching WRH-27's
+                # identical fix for BoxSerializer.create().
+                locked_item = SerializedItem.objects.select_for_update().get(pk=item.pk)
                 if (
                     locked_item.work_order_line_item_id is None
                     or locked_item.work_order_line_item.work_order_id != work_order.id
@@ -787,13 +791,21 @@ class WorkOrderViewSet(
                     )
                     continue
                 if locked_item.status == SerializedItem.STATUS_DAMAGED:
-                    # Matches return_item()'s identical no-op reflection of
-                    # an already-damaged item.
+                    # WRH-28/AC-3/TC-05: an item externally marked damaged
+                    # mid-box must be flagged like any other non-returnable
+                    # item, not folded into "added" - it wasn't actually
+                    # returned here (no Transaction, status left untouched),
+                    # so counting it as a success would both inflate the
+                    # "N items added" summary and hide it from the flagged
+                    # review list the AC asks for.
                     results.append(
                         {
                             "serial_number": locked_item.serial_number,
-                            "added": True,
-                            "reason": "",
+                            "added": False,
+                            "reason": (
+                                f"{locked_item.serial_number} is already marked"
+                                " damaged"
+                            ),
                         }
                     )
                     continue
