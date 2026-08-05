@@ -32,6 +32,7 @@ from inventory.serializers import (
     WorkOrderScanBoxSerializer,
     WorkOrderScanSerializer,
     WorkOrderSerializer,
+    WorkOrderTransferSerializer,
 )
 from inventory.serializers.work_order import _work_order_reference
 
@@ -851,6 +852,111 @@ class WorkOrderViewSet(
                 },
             },
             status=200,
+        )
+
+    @action(detail=True, methods=["post"])
+    def transfer(self, request, pk=None):
+        # WRH-36/AC-1/AC-2: reassign a currently-out item from this (source)
+        # work order to another (destination) - any WO, Primary or
+        # Supplementary. Unlike scan()/return_item(), no destination line
+        # item is chosen (the ticket's ACs/Test Cases never ask for one) -
+        # this only updates the item's last_work_order_reference and logs
+        # the move; it deliberately leaves work_order_line_item untouched,
+        # matching return_item()'s own "current claim only, no history"
+        # comment for that FK, since a destination line item to reassign it
+        # to doesn't exist in this flow.
+        source_work_order = self.get_object()
+        if source_work_order.status not in RETURN_ELIGIBLE_STATUSES:
+            raise ValidationError(
+                {"status": ["Work order is not eligible for transfer."]}
+            )
+
+        serializer = WorkOrderTransferSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serial_number = serializer.validated_data["serial_number"]
+        destination_work_order = serializer.validated_data["destination_work_order"]
+
+        if destination_work_order.id == source_work_order.id:
+            raise ValidationError(
+                {"destination_work_order": ["Item is already on this work order."]}
+            )
+
+        with transaction.atomic():
+            # WRH-28: no select_related("work_order_line_item") here - that
+            # FK is nullable, so pairing it with select_for_update() produces
+            # a LEFT OUTER JOIN Postgres refuses to lock, invisible on this
+            # repo's SQLite-backed CI. The lazy follow-up query below only
+            # fires on the rejection paths, matching return_box()'s identical
+            # fix.
+            try:
+                item = SerializedItem.objects.select_for_update().get(
+                    serial_number=serial_number
+                )
+            except SerializedItem.DoesNotExist:
+                raise ValidationError({"serial_number": ["Serial not found"]})
+
+            if (
+                item.work_order_line_item_id is None
+                or item.work_order_line_item.work_order_id != source_work_order.id
+            ):
+                raise ValidationError(
+                    {
+                        "serial_number": [
+                            f"{item.serial_number} is not currently out on"
+                            f" WO-{source_work_order.id}"
+                        ]
+                    }
+                )
+            if item.status != SerializedItem.STATUS_OUT:
+                raise ValidationError(
+                    {
+                        "serial_number": [
+                            f"{item.serial_number} is not currently out and"
+                            " cannot be transferred"
+                        ]
+                    }
+                )
+
+            source_reference = _work_order_reference(source_work_order)
+            destination_reference = _work_order_reference(destination_work_order)
+
+            item.last_work_order_reference = destination_reference
+            item.save(update_fields=["last_work_order_reference"])
+
+            # AC-3: two rows, not one - TransactionFilterSet.reference_number
+            # is a single-field exact match (see its own comment), so "the
+            # transfer entry appears in both WOs' logs" is only reachable by
+            # writing one row per WO, each cross-referencing the other via
+            # its note.
+            Transaction.objects.bulk_create(
+                [
+                    Transaction(
+                        transaction_type=Transaction.TYPE_TRANSFER,
+                        serialized_item=item,
+                        work_order=source_work_order,
+                        reference_number=source_reference,
+                        user=request.user,
+                        note=f"Transferred to {destination_reference}",
+                    ),
+                    Transaction(
+                        transaction_type=Transaction.TYPE_TRANSFER,
+                        serialized_item=item,
+                        work_order=destination_work_order,
+                        reference_number=destination_reference,
+                        user=request.user,
+                        note=f"Transferred from {source_reference}",
+                    ),
+                ]
+            )
+
+        return Response(
+            {
+                "serial_number": item.serial_number,
+                "status": item.status,
+                "source_work_order": source_reference,
+                "destination_work_order": destination_reference,
+            },
+            status=201,
         )
 
     @action(detail=True, methods=["get"], url_path="packing-list")

@@ -246,6 +246,28 @@ class WorkOrderReturnScanSerializer(serializers.Serializer):
     damaged = serializers.BooleanField(required=False, default=False)
 
 
+class WorkOrderTransferSerializer(serializers.Serializer):
+    # WRH-36/AC-1/AC-2: one scanned serial (currently out on the source WO
+    # in the URL) plus its destination WO - any WO, Primary or Supplementary
+    # (PRD v0.5 SS8 Open Question #6), matching WorkOrderSerializer.
+    # parent_work_order's "no queryset restriction needed beyond existing"
+    # reasoning: unlike parent_work_order, a transfer destination has no
+    # "must be a Primary" rule to enforce, so the queryset is unrestricted.
+    serial_number = serializers.CharField(
+        error_messages={
+            "blank": "Serial number is required.",
+            "required": "Serial number is required.",
+        },
+    )
+    destination_work_order = serializers.PrimaryKeyRelatedField(
+        queryset=WorkOrder.objects.all(),
+        error_messages={
+            "required": "Destination work order is required.",
+            "does_not_exist": "Select a work order that exists.",
+        },
+    )
+
+
 class WorkOrderActiveLineItemSerializer(serializers.ModelSerializer):
     # WRH-55/AC-2 (returned/still_out), WRH-57/AC-2/AC-3 (damaged) - "per-
     # type returned vs. damaged vs. still-out counts" - see
