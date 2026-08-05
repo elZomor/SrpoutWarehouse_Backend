@@ -15,6 +15,14 @@ Only log lessons that generalize (would bite again on a different ticket). Skip 
 
 ---
 
+## 2026-08-05 — WRH-28 — `select_for_update()` + `select_related()` across a nullable FK crashes on Postgres, invisible on this repo's SQLite CI
+
+- What: `return_box()` locked candidate `SerializedItem` rows with `.select_for_update().select_related("work_order_line_item")`. `work_order_line_item` is nullable, so the join is a `LEFT OUTER JOIN`, which Postgres refuses to lock (`NotSupportedError: FOR UPDATE cannot be applied to the nullable side of an outer join`) — reproduced live against the real `db` service before fixing. `python manage.py test` (SQLite, `USE_SQLITE=True`) is silent on this whole bug class since SQLite has no row-locking semantics to violate. This is at least the third call site with the identical shape: `BoxSerializer.create()` (WRH-27) was fixed the same way, and `return_item()` still has the identical pairing today, unfixed because it's outside this ticket's diff.
+- Fix: dropped the `select_related()`, keeping only `select_for_update()`; the one place the code reads `.work_order_line_item.work_order_id` sits on the rare rejection branch, so it now costs one lazy follow-up query only when that branch is actually hit.
+- Rule: before adding or reviewing any `select_for_update()` paired with `select_related()`/`prefetch_related()`, check whether the joined FK is `null=True`. If so, drop the `select_related()` (accept a lazy query on the rare path that needs it) rather than locking through the join. Don't trust a green `python manage.py test`/CI run as proof a `select_for_update()` path works on Postgres — verify directly against the running `db` service. A grep for `select_for_update()` across the codebase to sweep every remaining nullable-join instance (currently: `return_item()`) is a good candidate for its own follow-up ticket rather than opportunistic fixing inside unrelated tickets.
+
+---
+
 ## 2026-07-17 — WRH-54 — a new status/FK added to an existing model makes a sibling, untouched CRUD endpoint newly unsafe
 
 - What: `SerializedItem` previously had exactly one status ("available") and no downstream FK pointing at it, so `SerializedItemViewSet.destroy()` (from WRH-66, a different ticket) was a genuinely safe unconditional hard-delete — its own comment said so explicitly. WRH-54 added `STATUS_RESERVED`/`STATUS_OUT` and a `work_order_line_item` FK on `SerializedItem` to support scan-based fulfillment; this silently made `destroy()` unsafe (an authenticated user could hard-delete a `reserved` or `out` item, corrupting a WorkOrder's live `scanned_quantity` count or erasing a fulfilled WO's audit trail) even though zero lines in `views/serialized_item.py` were touched by the PR that caused it. `work_order_line_item`'s `on_delete=PROTECT` does **not** help here — PROTECT guards deleting the *referenced* row (`WorkOrderLineItem`), not the row carrying the FK (`SerializedItem`) itself.
