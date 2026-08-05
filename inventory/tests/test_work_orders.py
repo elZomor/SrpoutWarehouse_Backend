@@ -2013,3 +2013,158 @@ class WorkOrderReturnBoxTests(APITestCase):
         response = self.return_box(box.code)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WorkOrderTransferTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+        self.source_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        self.line_item = WorkOrderLineItemFactory(
+            work_order=self.source_work_order,
+            product_type=self.product_type,
+            quantity=2,
+        )
+        self.destination_work_order = WorkOrderFactory(
+            status=WorkOrder.STATUS_IN_PROGRESS
+        )
+
+    def _out_item(self):
+        return SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+    def transfer(self, serial_number, destination_work_order=None):
+        destination = destination_work_order or self.destination_work_order
+        return self.client.post(
+            reverse("workorder-transfer", args=[self.source_work_order.id]),
+            {"serial_number": serial_number, "destination_work_order": destination.id},
+            format="json",
+        )
+
+    def test_transfer_to_another_primary_wo(self):
+        # AC-1/TC-01: transfer recorded, item stays "out", reference updates.
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+        self.assertEqual(
+            item.last_work_order_reference, f"WO-{self.destination_work_order.id}"
+        )
+
+    def test_transfer_to_a_supplementary_wo(self):
+        # AC-2/TC-02: a Supplementary WO is a valid destination too.
+        item = self._out_item()
+        supplementary = WorkOrderFactory(
+            parent_work_order=self.destination_work_order,
+            supplementary_sequence=1,
+        )
+
+        response = self.transfer(
+            item.serial_number, destination_work_order=supplementary
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        item.refresh_from_db()
+        self.assertEqual(
+            item.last_work_order_reference,
+            f"WO-{self.destination_work_order.id}-S1",
+        )
+
+    def test_transfer_from_a_partially_returned_wo(self):
+        # AC-1/TC-03: source WO status "partially_returned" is still eligible.
+        self.source_work_order.status = WorkOrder.STATUS_PARTIALLY_RETURNED
+        self.source_work_order.save(update_fields=["status"])
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_transfer_visible_in_both_transaction_logs(self):
+        # AC-3/TC-04: the transfer entry appears in both WOs' logs, each
+        # cross-referencing the other.
+        item = self._out_item()
+
+        self.transfer(item.serial_number)
+
+        source_log = self.client.get(
+            reverse("transaction-list"),
+            {"reference_number": f"WO-{self.source_work_order.id}"},
+        )
+        destination_log = self.client.get(
+            reverse("transaction-list"),
+            {"reference_number": f"WO-{self.destination_work_order.id}"},
+        )
+        source_entries = source_log.data
+        destination_entries = destination_log.data
+        self.assertEqual(len(source_entries), 1)
+        self.assertEqual(len(destination_entries), 1)
+        self.assertEqual(
+            source_entries[0]["transaction_type"], Transaction.TYPE_TRANSFER
+        )
+        self.assertIn(f"WO-{self.destination_work_order.id}", source_entries[0]["note"])
+        self.assertIn(f"WO-{self.source_work_order.id}", destination_entries[0]["note"])
+
+    def test_transfer_rejects_a_nonexistent_serial_number(self):
+        response = self.transfer("SN-DOES-NOT-EXIST")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_rejects_an_item_not_currently_out(self):
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_AVAILABLE
+        )
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_rejects_an_item_issued_on_a_different_work_order(self):
+        other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        other_line_item = WorkOrderLineItemFactory(
+            work_order=other_work_order, product_type=self.product_type
+        )
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=other_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_rejects_the_same_work_order_as_destination(self):
+        item = self._out_item()
+
+        response = self.transfer(
+            item.serial_number, destination_work_order=self.source_work_order
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_rejects_when_source_work_order_is_draft(self):
+        self.source_work_order.status = WorkOrder.STATUS_DRAFT
+        self.source_work_order.save(update_fields=["status"])
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_requires_authentication(self):
+        self.client.logout()
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

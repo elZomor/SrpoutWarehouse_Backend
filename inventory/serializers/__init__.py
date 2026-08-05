@@ -22,6 +22,7 @@ from inventory.serializers.work_order import (
     WorkOrderScanBoxSerializer,
     WorkOrderScanSerializer,
     WorkOrderSerializer,
+    WorkOrderTransferSerializer,
 )
 
 __all__ = [
@@ -45,4 +46,5 @@ __all__ = [
     "WorkOrderScanBoxSerializer",
     "WorkOrderScanSerializer",
     "WorkOrderSerializer",
+    "WorkOrderTransferSerializer",
 ]
