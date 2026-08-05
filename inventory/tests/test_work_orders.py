@@ -1646,12 +1646,57 @@ class WorkOrderPackingListTests(APITestCase):
             "Packing list is available once fulfillment has started.",
         )
 
-    def test_packing_list_rejects_when_requested_on_a_supplementary(self):
+    def test_packing_list_from_supplementary_returns_consolidated_document(self):
+        # TC-02/AC-2: requesting from a supplementary's own screen returns
+        # the same consolidated Primary+supplementaries document as
+        # requesting from the Primary itself.
         primary = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
         supplementary = WorkOrderFactory(
             parent_work_order=primary,
             supplementary_sequence=1,
             status=WorkOrder.STATUS_FULFILLED,
+        )
+        primary_line_item = WorkOrderLineItemFactory(
+            work_order=primary, product_type=self.product_type
+        )
+        supp_line_item = WorkOrderLineItemFactory(
+            work_order=supplementary, product_type=self.product_type
+        )
+        SerializedItemFactory(
+            serial_number="SN-PRIMARY",
+            product_type=self.product_type,
+            work_order_line_item=primary_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+        SerializedItemFactory(
+            serial_number="SN-SUPP",
+            product_type=self.product_type,
+            work_order_line_item=supp_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+        response, mock_html_class = self._packing_list(supplementary)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            f'filename="packing-list-WO-{primary.id}.pdf"',
+            response["Content-Disposition"],
+        )
+        rendered_html = mock_html_class.call_args.kwargs["string"]
+        self.assertIn(f"WO-{primary.id}", rendered_html)
+        self.assertIn(f"WO-{primary.id}-S1", rendered_html)
+        self.assertIn("SN-PRIMARY", rendered_html)
+        self.assertIn("SN-SUPP", rendered_html)
+
+    def test_packing_list_from_supplementary_rejects_when_primary_is_draft(self):
+        # TC-01/AC-1: the guard is on the resolved document's Primary, not
+        # the supplementary's own status, since the redirected request
+        # generates the Primary's consolidated document either way.
+        primary = WorkOrderFactory()
+        supplementary = WorkOrderFactory(
+            parent_work_order=primary,
+            supplementary_sequence=1,
+            status=WorkOrder.STATUS_IN_PROGRESS,
         )
 
         response, _ = self._packing_list(supplementary)
@@ -1659,7 +1704,7 @@ class WorkOrderPackingListTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
             response.data["detail"],
-            "Download the packing list from the Primary work order instead.",
+            "Packing list is available once fulfillment has started.",
         )
 
 
