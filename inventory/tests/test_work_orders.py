@@ -2152,6 +2152,17 @@ class WorkOrderTransferTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_transfer_rejects_a_closed_destination_work_order(self):
+        # AC-4/TC-04: a "returned" (closed/read-only) destination WO is
+        # rejected.
+        self.destination_work_order.status = WorkOrder.STATUS_RETURNED
+        self.destination_work_order.save(update_fields=["status"])
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_transfer_rejects_when_source_work_order_is_draft(self):
         self.source_work_order.status = WorkOrder.STATUS_DRAFT
         self.source_work_order.save(update_fields=["status"])

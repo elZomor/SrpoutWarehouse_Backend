@@ -881,6 +881,20 @@ class WorkOrderViewSet(
                 {"destination_work_order": ["Item is already on this work order."]}
             )
 
+        # WRH-37/AC-4: STATUS_RETURNED is this model's terminal/closed state
+        # (see packing_list()'s and return_item()'s comments above - there is
+        # no separate STATUS_CLOSED yet) - a fully returned WO is read-only,
+        # so it can't be a transfer destination either.
+        if destination_work_order.status == WorkOrder.STATUS_RETURNED:
+            raise ValidationError(
+                {
+                    "destination_work_order": [
+                        "Destination work order is closed and cannot receive"
+                        " transfers."
+                    ]
+                }
+            )
+
         with transaction.atomic():
             # WRH-28: no select_related("work_order_line_item") here - that
             # FK is nullable, so pairing it with select_for_update() produces
