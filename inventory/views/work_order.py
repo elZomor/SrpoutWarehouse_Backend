@@ -57,6 +57,15 @@ CLOSE_ELIGIBLE_STATUSES = RETURN_ELIGIBLE_STATUSES
 # exclusion, transfer's destination guard).
 _TERMINAL_STATUSES = (WorkOrder.STATUS_RETURNED, WorkOrder.STATUS_CLOSED)
 
+# Shared by _active_line_items_queryset(), _finalize_return_status(), and
+# close() - "still out" means anything but available (genuinely returned) or
+# damaged (its own outcome, WRH-57/AC-3), whichever of the three needs to
+# express that same exclusion.
+NOT_STILL_OUT_STATUSES = (
+    SerializedItem.STATUS_AVAILABLE,
+    SerializedItem.STATUS_DAMAGED,
+)
+
 
 def _unavailable_item_message(item):
     # WRH-33/AC-1/AC-3: scan() rejects a non-available item with a reason
@@ -94,10 +103,6 @@ def _active_line_items_queryset():
     # RETURNED_COUNT_ANNOTATION's model-level comment for why still_out
     # excludes AVAILABLE *and* DAMAGED (WRH-57/AC-3) rather than only
     # counting STATUS_OUT.
-    _not_still_out = (
-        SerializedItem.STATUS_AVAILABLE,
-        SerializedItem.STATUS_DAMAGED,
-    )
     return WorkOrderLineItem.objects.select_related("product_type").annotate(
         **{
             RETURNED_COUNT_ANNOTATION: Count(
@@ -110,7 +115,7 @@ def _active_line_items_queryset():
             ),
             STILL_OUT_COUNT_ANNOTATION: Count(
                 "serialized_items",
-                filter=~Q(serialized_items__status__in=_not_still_out),
+                filter=~Q(serialized_items__status__in=NOT_STILL_OUT_STATUSES),
             ),
         }
     )
@@ -735,12 +740,7 @@ class WorkOrderViewSet(
             SerializedItem.objects.filter(
                 work_order_line_item__work_order_id=work_order.id
             )
-            .exclude(
-                status__in=[
-                    SerializedItem.STATUS_AVAILABLE,
-                    SerializedItem.STATUS_DAMAGED,
-                ]
-            )
+            .exclude(status__in=NOT_STILL_OUT_STATUSES)
             .count()
         )
         work_order.status = (
@@ -901,15 +901,26 @@ class WorkOrderViewSet(
                 )
 
             # Same "still out" definition _finalize_return_status uses -
-            # everything but available/damaged.
+            # everything but available/damaged. Also excludes an item
+            # transfer()'d away from this WO to another one: transfer()
+            # deliberately never reassigns work_order_line_item (see its own
+            # "no destination line item" comment), so such an item still
+            # matches the filter above by that stale FK even though it's
+            # legitimately out on the *destination* WO now, not lost - the
+            # Transaction row transfer() writes against this WO
+            # (TYPE_TRANSFER, source-side) is the one reliable signal that
+            # this item's whereabouts moved on since. Unlike
+            # _finalize_return_status's identical FK staleness (a read-only
+            # count that can go stale "after the fact" per return_item()'s
+            # own comment), close() performs an irreversible write off this
+            # query, so the same staleness needs an actual guard here.
             still_out_items = list(
                 SerializedItem.objects.select_for_update()
                 .filter(work_order_line_item__work_order_id=work_order.id)
+                .exclude(status__in=NOT_STILL_OUT_STATUSES)
                 .exclude(
-                    status__in=[
-                        SerializedItem.STATUS_AVAILABLE,
-                        SerializedItem.STATUS_DAMAGED,
-                    ]
+                    transactions__work_order_id=work_order.id,
+                    transactions__transaction_type=Transaction.TYPE_TRANSFER,
                 )
             )
             if still_out_items:

@@ -2248,6 +2248,36 @@ class WorkOrderCloseTests(APITestCase):
             3,
         )
 
+    def test_close_excludes_an_item_transferred_away_to_another_wo(self):
+        # An item transfer()'d off this WO to another one is legitimately
+        # out on the *destination* WO, not lost - close() must not sweep it
+        # into Missing Items just because transfer() never reassigns
+        # work_order_line_item.
+        item = self._out_item()
+        destination = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[self.work_order.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": destination.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 0)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+        self.assertEqual(
+            Transaction.objects.filter(
+                serialized_item=item, transaction_type=Transaction.TYPE_MISSING
+            ).count(),
+            0,
+        )
+
     def test_close_a_partially_returned_wo(self):
         # TC-04
         items = [self._out_item() for _ in range(2)]
