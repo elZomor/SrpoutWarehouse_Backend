@@ -60,7 +60,14 @@ _TERMINAL_STATUSES = (WorkOrder.STATUS_RETURNED, WorkOrder.STATUS_CLOSED)
 # Shared by _active_line_items_queryset(), _finalize_return_status(), and
 # close() - "still out" means anything but available (genuinely returned) or
 # damaged (its own outcome, WRH-57/AC-3), whichever of the three needs to
-# express that same exclusion.
+# express that same exclusion. Deliberately still counts a missing item as
+# "still out" (WRH-55's own test_still_out_count_treats_a_missing_item_as_
+# not_yet_returned) - on the active list this is exactly the point (an
+# unaccounted-for item shouldn't silently vanish from the summary), so
+# close()'s response inheriting the same reading ("N items still
+# out/unaccounted-for") alongside its own missing_count is a second,
+# consistent lens on the same items, not a contradiction worth a
+# still-out definition that would undo WRH-55's own intentional choice.
 NOT_STILL_OUT_STATUSES = (
     SerializedItem.STATUS_AVAILABLE,
     SerializedItem.STATUS_DAMAGED,
@@ -938,11 +945,14 @@ class WorkOrderViewSet(
                     ],
                     serialized_item_id__in=[item.id for item in still_out_candidates],
                 )
-                .order_by("id")
+                .order_by("created_at", "id")
                 .values_list("serialized_item_id", "transaction_type")
             ):
-                # Iterating in id order and overwriting per item_id leaves
-                # each item's most recent (TRANSFER-vs-ISSUE) row standing.
+                # Matches Transaction.Meta.ordering exactly (its own
+                # declared canonical chronological order) rather than id
+                # alone. Iterating in that order and overwriting per
+                # item_id leaves each item's most recent (TRANSFER-vs-ISSUE)
+                # row standing.
                 last_relevant_type_by_item[item_id] = transaction_type
 
             still_out_items = [
