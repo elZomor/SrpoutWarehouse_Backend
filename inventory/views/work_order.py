@@ -900,28 +900,34 @@ class WorkOrderViewSet(
                     {"status": ["Work order is not eligible for closing."]}
                 )
 
-            # Same "still out" definition _finalize_return_status uses -
-            # everything but available/damaged. Also excludes an item
-            # transfer()'d away from this WO to another one: transfer()
-            # deliberately never reassigns work_order_line_item (see its own
-            # "no destination line item" comment), so such an item still
-            # matches the filter above by that stale FK even though it's
-            # legitimately out on the *destination* WO now, not lost - the
-            # Transaction row transfer() writes against this WO
-            # (TYPE_TRANSFER, source-side) is the one reliable signal that
-            # this item's whereabouts moved on since. Unlike
+            # Also excludes an item transfer()'d away from this WO to
+            # another one: transfer() deliberately never reassigns
+            # work_order_line_item (see its own "no destination line item"
+            # comment), so such an item still matches the filter below by
+            # that stale FK even though it's legitimately out on the
+            # *destination* WO now, not lost. The Transaction row transfer()
+            # writes against this WO (TYPE_TRANSFER, source-side) is the
+            # reliable signal that this item's whereabouts moved on since -
+            # queried as a plain field lookup on Transaction itself (not a
+            # multi-condition exclude() spanning the transactions relation,
+            # which doesn't get "same related row" semantics the way
+            # filter() does - Django's own docs call this out explicitly for
+            # exclude() across multi-valued relationships). Unlike
             # _finalize_return_status's identical FK staleness (a read-only
             # count that can go stale "after the fact" per return_item()'s
             # own comment), close() performs an irreversible write off this
             # query, so the same staleness needs an actual guard here.
+            transferred_away_ids = Transaction.objects.filter(
+                work_order_id=work_order.id,
+                transaction_type=Transaction.TYPE_TRANSFER,
+            ).values_list("serialized_item_id", flat=True)
+            # Same "still out" definition _finalize_return_status uses -
+            # everything but available/damaged.
             still_out_items = list(
                 SerializedItem.objects.select_for_update()
                 .filter(work_order_line_item__work_order_id=work_order.id)
                 .exclude(status__in=NOT_STILL_OUT_STATUSES)
-                .exclude(
-                    transactions__work_order_id=work_order.id,
-                    transactions__transaction_type=Transaction.TYPE_TRANSFER,
-                )
+                .exclude(id__in=transferred_away_ids)
             )
             if still_out_items:
                 SerializedItem.objects.filter(

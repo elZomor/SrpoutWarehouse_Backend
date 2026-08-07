@@ -2278,6 +2278,60 @@ class WorkOrderCloseTests(APITestCase):
             0,
         )
 
+    def test_close_still_sweeps_an_item_with_unrelated_past_transfer_history(self):
+        # Guards the exclude() fix itself: a plain multi-kwarg
+        # .exclude(transactions__work_order_id=X, transactions__
+        # transaction_type=TRANSFER) doesn't get "same related row"
+        # semantics from Django for a to-many relation (unlike filter()) -
+        # it compiles to two independent EXISTS subqueries ANDed together.
+        # An item transferred between two *other*, unrelated work orders in
+        # the past, then genuinely returned and re-issued fresh on this WO
+        # (never transferred off *this* WO), would be wrongly excluded by
+        # that broken form - it has some transaction of type TRANSFER
+        # (against the old WOs) and some transaction referencing this WO
+        # (the fresh issue), just never both on the same row.
+        old_source = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        old_destination = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=WorkOrderLineItemFactory(
+                work_order=old_source, product_type=self.product_type
+            ),
+            status=SerializedItem.STATUS_OUT,
+        )
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[old_source.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": old_destination.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        # Simulate it eventually coming back and being freshly issued on
+        # this ticket's own work_order.
+        item.status = SerializedItem.STATUS_AVAILABLE
+        item.save(update_fields=["status"])
+        self.line_item.quantity = 1
+        self.line_item.save(update_fields=["quantity"])
+        self.work_order.status = WorkOrder.STATUS_DRAFT
+        self.work_order.save(update_fields=["status"])
+        self.client.post(reverse("workorder-start", args=[self.work_order.id]))
+        self.client.post(
+            reverse("workorder-scan", args=[self.work_order.id]),
+            {"line_item": self.line_item.id, "serial_number": item.serial_number},
+            format="json",
+        )
+        self.client.post(reverse("workorder-complete", args=[self.work_order.id]))
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
+
     def test_close_a_partially_returned_wo(self):
         # TC-04
         items = [self._out_item() for _ in range(2)]
