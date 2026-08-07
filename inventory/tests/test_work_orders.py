@@ -1131,6 +1131,24 @@ class WorkOrderReturnItemTests(APITestCase):
         items[1].refresh_from_db()
         self.assertEqual(items[1].status, SerializedItem.STATUS_DAMAGED)
 
+    def test_wo_reaches_returned_status_with_a_written_off_item_outstanding(self):
+        # WRH-40: NOT_STILL_OUT_STATUSES (shared with close()) now also
+        # excludes STATUS_WRITTEN_OFF, matching STATUS_DAMAGED's existing
+        # "resolved, doesn't block reaching returned" precedent (see the
+        # damaged-item test right above) - a written-off item (admin-
+        # settable, no endpoint sets it yet) is at least as final as a
+        # damaged one, so the same exclusion should apply symmetrically.
+        items = [self._out_item() for _ in range(2)]
+        items[1].status = SerializedItem.STATUS_WRITTEN_OFF
+        items[1].save(update_fields=["status"])
+
+        response = self.return_item(items[0].serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        items[1].refresh_from_db()
+        self.assertEqual(items[1].status, SerializedItem.STATUS_WRITTEN_OFF)
+
     def test_return_rejects_an_item_issued_on_a_different_work_order(self):
         other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
         other_line_item = WorkOrderLineItemFactory(
