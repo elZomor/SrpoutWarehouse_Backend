@@ -44,6 +44,19 @@ RETURN_ELIGIBLE_STATUSES = (
     WorkOrder.STATUS_PARTIALLY_RETURNED,
 )
 
+# WRH-40/AC-1/AC-4: manual close is eligible from the same states a return
+# is - a fully "returned" WO is already terminal and not eligible (AC-4's
+# note), matching return_item()/return_box()'s identical eligibility rule
+# rather than re-deriving it as a separate tuple.
+CLOSE_ELIGIBLE_STATUSES = RETURN_ELIGIBLE_STATUSES
+
+# WRH-40: both terminal WO states - a "returned" WO reached that state by
+# every item genuinely coming back, a "closed" one by a manual close (with
+# possibly some items moved to Missing Items instead). Shared by every site
+# that treats "this WO is done" as a single condition (active-list
+# exclusion, transfer's destination guard).
+_TERMINAL_STATUSES = (WorkOrder.STATUS_RETURNED, WorkOrder.STATUS_CLOSED)
+
 
 def _unavailable_item_message(item):
     # WRH-33/AC-1/AC-3: scan() rejects a non-available item with a reason
@@ -136,22 +149,24 @@ class WorkOrderViewSet(
             # WorkOrderActiveSupplementarySerializer's comment). WRH-38:
             # a fully "returned" WO is done - excluded so it doesn't stay
             # on this list forever once return_item() closes it out.
-            # "partially_returned" still needs attention, so it stays.
+            # WRH-40: a manually "closed" WO is equally done - excluded the
+            # same way. "partially_returned" still needs attention, so it
+            # stays.
             return (
                 WorkOrder.objects.filter(parent_work_order__isnull=True)
-                .exclude(status=WorkOrder.STATUS_RETURNED)
+                .exclude(status__in=_TERMINAL_STATUSES)
                 .order_by("-expected_date_out", "-id")
                 .prefetch_related(
                     Prefetch("line_items", queryset=_active_line_items_queryset()),
                     Prefetch(
                         "supplementaries",
-                        # Same "a fully returned WO is done" exclusion as
-                        # the primary-level queryset above - a
-                        # supplementary can independently reach
-                        # STATUS_RETURNED too, and should stop nesting
-                        # under its (still-active) primary once it does.
+                        # Same "a done WO is excluded" reasoning as the
+                        # primary-level queryset above - a supplementary can
+                        # independently reach STATUS_RETURNED/STATUS_CLOSED
+                        # too, and should stop nesting under its
+                        # (still-active) primary once it does.
                         queryset=WorkOrder.objects.exclude(
-                            status=WorkOrder.STATUS_RETURNED
+                            status__in=_TERMINAL_STATUSES
                         )
                         .order_by("-expected_date_out", "-id")
                         .prefetch_related(
@@ -210,6 +225,7 @@ class WorkOrderViewSet(
             "complete",
             "return_item",
             "return_box",
+            "close",
         ):
             # Both actions build their own fresh, request-scoped query for
             # their response (see below) and never read the prefetched
@@ -855,6 +871,77 @@ class WorkOrderViewSet(
         )
 
     @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        # AC-1/AC-2: manually close a fulfilled/partially_returned WO even
+        # with items still out - every remaining out item moves to
+        # SerializedItem.STATUS_MISSING (surfaced as "Missing Items" by the
+        # stock dashboard - ProductTypeStockSummarySerializer.get_missing())
+        # rather than a separate list this action has to maintain itself.
+        # AC-3: closing makes the WO read-only - already true for free, since
+        # STATUS_CLOSED isn't in STATUS_DRAFT/STATUS_IN_PROGRESS/
+        # RETURN_ELIGIBLE_STATUSES, the only states start()/scan()/
+        # scan_box()/complete()/return_item()/return_box()/transfer() ever
+        # accept. AC-4: a WO that happens to have zero items out at close
+        # time (all already returned normally) closes cleanly with no items
+        # moved and no Transaction rows created.
+        work_order = self.get_object()
+        if work_order.status not in CLOSE_ELIGIBLE_STATUSES:
+            raise ValidationError(
+                {"status": ["Work order is not eligible for closing."]}
+            )
+
+        with transaction.atomic():
+            # Lock the parent WorkOrder row - same "lock the row whose
+            # invariant you're protecting" reasoning as every other
+            # status-mutating action on this model.
+            work_order = WorkOrder.objects.select_for_update().get(pk=work_order.pk)
+            if work_order.status not in CLOSE_ELIGIBLE_STATUSES:
+                raise ValidationError(
+                    {"status": ["Work order is not eligible for closing."]}
+                )
+
+            # Same "still out" definition _finalize_return_status uses -
+            # everything but available/damaged.
+            still_out_items = list(
+                SerializedItem.objects.select_for_update()
+                .filter(work_order_line_item__work_order_id=work_order.id)
+                .exclude(
+                    status__in=[
+                        SerializedItem.STATUS_AVAILABLE,
+                        SerializedItem.STATUS_DAMAGED,
+                    ]
+                )
+            )
+            if still_out_items:
+                SerializedItem.objects.filter(
+                    id__in=[item.id for item in still_out_items]
+                ).update(status=SerializedItem.STATUS_MISSING)
+                Transaction.objects.bulk_create(
+                    [
+                        Transaction(
+                            transaction_type=Transaction.TYPE_MISSING,
+                            serialized_item_id=item.id,
+                            work_order=work_order,
+                            reference_number=f"WO-{work_order.id}",
+                            user=request.user,
+                        )
+                        for item in still_out_items
+                    ]
+                )
+
+            work_order.status = WorkOrder.STATUS_CLOSED
+            work_order.save(update_fields=["status"])
+            self._refresh_line_items(work_order, _active_line_items_queryset)
+
+        return Response(
+            {
+                "work_order": WorkOrderReturnSerializer(work_order).data,
+                "missing_count": len(still_out_items),
+            },
+            status=200,
+        )
+
+    @action(detail=True, methods=["post"])
     def transfer(self, request, pk=None):
         # WRH-36/AC-1/AC-2: reassign a currently-out item from this (source)
         # work order to another (destination) - any WO, Primary or
@@ -881,11 +968,10 @@ class WorkOrderViewSet(
                 {"destination_work_order": ["Item is already on this work order."]}
             )
 
-        # WRH-37/AC-4: STATUS_RETURNED is this model's terminal/closed state
-        # (see packing_list()'s and return_item()'s comments above - there is
-        # no separate STATUS_CLOSED yet) - a fully returned WO is read-only,
-        # so it can't be a transfer destination either.
-        if destination_work_order.status == WorkOrder.STATUS_RETURNED:
+        # WRH-37/AC-4, WRH-40/AC-3: both of this model's terminal states
+        # (_TERMINAL_STATUSES) are read-only, so neither can be a transfer
+        # destination.
+        if destination_work_order.status in _TERMINAL_STATUSES:
             raise ValidationError(
                 {
                     "destination_work_order": [
@@ -977,10 +1063,9 @@ class WorkOrderViewSet(
     def packing_list(self, request, pk=None):
         # WRH-34/AC-1/AC-3/AC-4: available from "in_progress" onward - PRD's
         # listed statuses (in_progress, fulfilled, partially_returned,
-        # returned, closed) are every non-draft status this model can carry
-        # (there is no STATUS_CLOSED yet), so the gate is "not draft" rather
-        # than an explicit allowlist - a future closed status would already
-        # satisfy this with no code change here.
+        # returned, closed) are every non-draft status this model can carry,
+        # so the gate is "not draft" rather than an explicit allowlist -
+        # WRH-40's STATUS_CLOSED satisfies this with no code change here too.
         # WRH-35/AC-2: requested on a supplementary directly - resolve to its
         # Primary and generate the identical consolidated document, rather
         # than rejecting (WRH-34's original behavior). Re-fetched through
