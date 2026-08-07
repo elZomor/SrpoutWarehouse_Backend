@@ -2332,6 +2332,65 @@ class WorkOrderCloseTests(APITestCase):
         item.refresh_from_db()
         self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
 
+    def test_close_sweeps_an_item_reissued_after_arriving_via_transfer(self):
+        # Guards against conflating transfer()'s source-side and
+        # destination-side Transaction rows: this WO was once a transfer
+        # *destination* for the item (its own TYPE_TRANSFER row has
+        # work_order=this_wo too, just from the other side of that call),
+        # so a naive "any TRANSFER row referencing this WO" exclusion would
+        # wrongly skip it here even though it was later genuinely, freshly
+        # re-issued onto this WO and is still out on it right now.
+        origin = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=WorkOrderLineItemFactory(
+                work_order=origin, product_type=self.product_type
+            ),
+            status=SerializedItem.STATUS_OUT,
+        )
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[origin.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": self.work_order.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        # return_item()'s own pre-existing "trusts the stale FK" limitation
+        # (see its comment) lets this succeed on `origin` even though the
+        # item is procedurally on self.work_order now - the FK was never
+        # reassigned by transfer().
+        return_response = self.client.post(
+            reverse("workorder-return-item", args=[origin.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+        self.assertEqual(return_response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+
+        # Now genuinely, freshly re-issued onto this WO.
+        self.line_item.quantity = 1
+        self.line_item.save(update_fields=["quantity"])
+        self.work_order.status = WorkOrder.STATUS_DRAFT
+        self.work_order.save(update_fields=["status"])
+        self.client.post(reverse("workorder-start", args=[self.work_order.id]))
+        self.client.post(
+            reverse("workorder-scan", args=[self.work_order.id]),
+            {"line_item": self.line_item.id, "serial_number": item.serial_number},
+            format="json",
+        )
+        self.client.post(reverse("workorder-complete", args=[self.work_order.id]))
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
+
     def test_close_a_partially_returned_wo(self):
         # TC-04
         items = [self._out_item() for _ in range(2)]

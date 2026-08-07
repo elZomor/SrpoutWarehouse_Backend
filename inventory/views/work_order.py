@@ -900,35 +900,56 @@ class WorkOrderViewSet(
                     {"status": ["Work order is not eligible for closing."]}
                 )
 
-            # Also excludes an item transfer()'d away from this WO to
-            # another one: transfer() deliberately never reassigns
-            # work_order_line_item (see its own "no destination line item"
-            # comment), so such an item still matches the filter below by
-            # that stale FK even though it's legitimately out on the
-            # *destination* WO now, not lost. The Transaction row transfer()
-            # writes against this WO (TYPE_TRANSFER, source-side) is the
-            # reliable signal that this item's whereabouts moved on since -
-            # queried as a plain field lookup on Transaction itself (not a
-            # multi-condition exclude() spanning the transactions relation,
-            # which doesn't get "same related row" semantics the way
-            # filter() does - Django's own docs call this out explicitly for
-            # exclude() across multi-valued relationships). Unlike
-            # _finalize_return_status's identical FK staleness (a read-only
-            # count that can go stale "after the fact" per return_item()'s
-            # own comment), close() performs an irreversible write off this
-            # query, so the same staleness needs an actual guard here.
-            transferred_away_ids = Transaction.objects.filter(
-                work_order_id=work_order.id,
-                transaction_type=Transaction.TYPE_TRANSFER,
-            ).values_list("serialized_item_id", flat=True)
             # Same "still out" definition _finalize_return_status uses -
             # everything but available/damaged.
-            still_out_items = list(
+            still_out_candidates = list(
                 SerializedItem.objects.select_for_update()
                 .filter(work_order_line_item__work_order_id=work_order.id)
                 .exclude(status__in=NOT_STILL_OUT_STATUSES)
-                .exclude(id__in=transferred_away_ids)
             )
+
+            # Excludes an item transfer()'d away from this WO to another
+            # one: transfer() deliberately never reassigns
+            # work_order_line_item (see its own "no destination line item"
+            # comment), so such an item still matches the filter above by
+            # that stale FK even though it's legitimately out on the
+            # *destination* WO now, not lost. TYPE_TRANSFER Transaction rows
+            # alone aren't a reliable signal on their own - transfer()
+            # writes one against *both* the source and destination WO for
+            # every call, so a WO that only ever received a transfer (was
+            # the destination) would be wrongly excluded too, and a plain
+            # "any TRANSFER row for this WO+item" check can't tell those
+            # apart. What actually matters is *recency*: if this WO's own
+            # complete() later re-issued the item fresh (a TYPE_ISSUE row
+            # for this WO, necessarily created after any transfer - the two
+            # never share a bulk_create() call, so there's no tie to break),
+            # that overrides an earlier transfer and the item is genuinely,
+            # currently out here again - reachable e.g. via return_item()'s
+            # own pre-existing "trusts the stale FK" limitation (see its
+            # comment) letting an already-transferred item be returned on
+            # the wrong WO and then legitimately re-scanned onto this one.
+            last_relevant_type_by_item = {}
+            for item_id, transaction_type in (
+                Transaction.objects.filter(
+                    work_order_id=work_order.id,
+                    transaction_type__in=[
+                        Transaction.TYPE_TRANSFER,
+                        Transaction.TYPE_ISSUE,
+                    ],
+                    serialized_item_id__in=[item.id for item in still_out_candidates],
+                )
+                .order_by("id")
+                .values_list("serialized_item_id", "transaction_type")
+            ):
+                # Iterating in id order and overwriting per item_id leaves
+                # each item's most recent (TRANSFER-vs-ISSUE) row standing.
+                last_relevant_type_by_item[item_id] = transaction_type
+
+            still_out_items = [
+                item
+                for item in still_out_candidates
+                if last_relevant_type_by_item.get(item.id) != Transaction.TYPE_TRANSFER
+            ]
             if still_out_items:
                 SerializedItem.objects.filter(
                     id__in=[item.id for item in still_out_items]
