@@ -2248,6 +2248,23 @@ class WorkOrderCloseTests(APITestCase):
             3,
         )
 
+    def test_close_does_not_clobber_a_written_off_item(self):
+        # A written-off item (admin-settable today) is a resolved terminal
+        # outcome like damaged, not "still out" - close() must not sweep it
+        # back to STATUS_MISSING and destroy the write-off record.
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_WRITTEN_OFF,
+        )
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 0)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_WRITTEN_OFF)
+
     def test_close_excludes_an_item_transferred_away_to_another_wo(self):
         # An item transfer()'d off this WO to another one is legitimately
         # out on the *destination* WO, not lost - close() must not sweep it

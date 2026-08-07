@@ -71,6 +71,12 @@ _TERMINAL_STATUSES = (WorkOrder.STATUS_RETURNED, WorkOrder.STATUS_CLOSED)
 NOT_STILL_OUT_STATUSES = (
     SerializedItem.STATUS_AVAILABLE,
     SerializedItem.STATUS_DAMAGED,
+    # WRH-40: written off (admin-settable today per its own model comment;
+    # a future write-off endpoint's target status) is a resolved terminal
+    # outcome exactly like damaged, not "still pending" - without this,
+    # close()'s bulk sweep would silently clobber a written-off item back
+    # to STATUS_MISSING, destroying the write-off record.
+    SerializedItem.STATUS_WRITTEN_OFF,
 )
 
 
@@ -908,9 +914,14 @@ class WorkOrderViewSet(
                 )
 
             # Same "still out" definition _finalize_return_status uses -
-            # everything but available/damaged.
+            # everything but available/damaged. of=("self",) restricts the
+            # lock to SerializedItem rows - unlike every other
+            # select_for_update() in this file (a plain single-table
+            # .get(pk=...)/.get(serial_number=...)), this filter joins to
+            # WorkOrderLineItem, and FOR UPDATE locks every joined table by
+            # default without it.
             still_out_candidates = list(
-                SerializedItem.objects.select_for_update()
+                SerializedItem.objects.select_for_update(of=("self",))
                 .filter(work_order_line_item__work_order_id=work_order.id)
                 .exclude(status__in=NOT_STILL_OUT_STATUSES)
             )
