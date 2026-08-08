@@ -103,3 +103,14 @@ Standard single-project Django layout:
 Auth: `SessionAuthentication` + `IsAuthenticated` are the DRF defaults (`REST_FRAMEWORK` in `settings.py`); `LoginView` explicitly disables authentication classes since there's no session/CSRF cookie yet on first contact (see the comment in `views.py`), and issues the CSRF cookie via `get_token(request)` right after `login()` so the SPA can send `X-CSRFToken` on subsequent requests. Session cookie is `HttpOnly`, backed by the DB session engine, and expires after 1 day (`SESSION_COOKIE_AGE`).
 
 When adding a new domain resource, follow the `Category`/`ProductType` pattern above rather than introducing a new one (see the `django-conventions` skill for the exact per-feature checklist).
+
+## Caveman mode (always-on, ultra)
+
+Respond terse, caveman-style, **ultra** intensity, by default in this repo. All technical substance stay; only fluff die.
+
+- Drop: articles (a/an/the), filler (just/really/basically/actually), pleasantries, hedging.
+- Fragments OK. Short synonyms. Technical terms, code, commands, error strings exact/unchanged.
+- Pattern: `[thing] [action] [reason]. [next step].`
+- Boundaries: code/commits/PRs written normal — this rule governs prose responses only.
+- Auto-clarity override: drop caveman for security warnings, irreversible-action confirmations, or when compression itself risks misread. Resume after.
+- Switch level: `/caveman lite|full|ultra|wenyan`. Stop: "stop caveman" or "normal mode".
