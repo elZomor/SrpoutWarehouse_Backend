@@ -2498,6 +2498,16 @@ class WorkOrderCloseTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("status", response.data)
 
+    def test_close_rejects_when_work_order_is_in_progress(self):
+        # WRH-41/AC-2/TC-02
+        self.work_order.status = WorkOrder.STATUS_IN_PROGRESS
+        self.work_order.save(update_fields=["status"])
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
     def test_close_rejects_when_work_order_already_returned(self):
         # AC-4's note: a fully "returned" WO is already terminal, not
         # eligible for manual close.
