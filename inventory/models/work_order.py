@@ -33,12 +33,19 @@ class WorkOrder(models.Model):
     # WorkOrderViewSet.return_item() is the only path that sets either.
     STATUS_RETURNED = "returned"
     STATUS_PARTIALLY_RETURNED = "partially_returned"
+    # WRH-40/AC-2: set only by WorkOrderViewSet.close() - a manager can
+    # manually close a fulfilled/partially_returned WO even with items still
+    # out (they move to SerializedItem.STATUS_MISSING). Distinct from
+    # STATUS_RETURNED, which return_item()/return_box() only ever reach once
+    # every issued item is genuinely back.
+    STATUS_CLOSED = "closed"
     STATUS_CHOICES = [
         (STATUS_DRAFT, "Draft"),
         (STATUS_IN_PROGRESS, "In progress"),
         (STATUS_FULFILLED, "Fulfilled"),
         (STATUS_RETURNED, "Returned"),
         (STATUS_PARTIALLY_RETURNED, "Partially returned"),
+        (STATUS_CLOSED, "Closed"),
     ]
 
     job_name = models.CharField(max_length=255)

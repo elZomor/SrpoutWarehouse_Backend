@@ -1131,6 +1131,24 @@ class WorkOrderReturnItemTests(APITestCase):
         items[1].refresh_from_db()
         self.assertEqual(items[1].status, SerializedItem.STATUS_DAMAGED)
 
+    def test_wo_reaches_returned_status_with_a_written_off_item_outstanding(self):
+        # WRH-40: NOT_STILL_OUT_STATUSES (shared with close()) now also
+        # excludes STATUS_WRITTEN_OFF, matching STATUS_DAMAGED's existing
+        # "resolved, doesn't block reaching returned" precedent (see the
+        # damaged-item test right above) - a written-off item (admin-
+        # settable, no endpoint sets it yet) is at least as final as a
+        # damaged one, so the same exclusion should apply symmetrically.
+        items = [self._out_item() for _ in range(2)]
+        items[1].status = SerializedItem.STATUS_WRITTEN_OFF
+        items[1].save(update_fields=["status"])
+
+        response = self.return_item(items[0].serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        items[1].refresh_from_db()
+        self.assertEqual(items[1].status, SerializedItem.STATUS_WRITTEN_OFF)
+
     def test_return_rejects_an_item_issued_on_a_different_work_order(self):
         other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
         other_line_item = WorkOrderLineItemFactory(
@@ -1359,6 +1377,19 @@ class WorkOrderActiveListTests(APITestCase):
 
         supplementary_ids = [s["id"] for s in response.data[0]["supplementaries"]]
         self.assertEqual(supplementary_ids, [still_active_supplementary.id])
+
+    def test_active_list_excludes_a_manually_closed_work_order(self):
+        # WRH-40/AC-3: same "done, don't stay on the Active tab" exclusion
+        # WRH-38's STATUS_RETURNED gets, now also for a manually closed WO.
+        WorkOrderFactory(created_by=self.user, status=WorkOrder.STATUS_CLOSED)
+        still_active = WorkOrderFactory(
+            created_by=self.user, status=WorkOrder.STATUS_PARTIALLY_RETURNED
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        ids = [row["id"] for row in response.data]
+        self.assertEqual(ids, [still_active.id])
 
     def test_active_list_excludes_supplementaries_from_the_top_level(self):
         primary = WorkOrderFactory(created_by=self.user)
@@ -2163,6 +2194,17 @@ class WorkOrderTransferTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_transfer_rejects_a_manually_closed_destination_work_order(self):
+        # WRH-40/AC-3: a manually closed destination WO is read-only, same
+        # as a fully returned one.
+        self.destination_work_order.status = WorkOrder.STATUS_CLOSED
+        self.destination_work_order.save(update_fields=["status"])
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_transfer_rejects_when_source_work_order_is_draft(self):
         self.source_work_order.status = WorkOrder.STATUS_DRAFT
         self.source_work_order.save(update_fields=["status"])
@@ -2179,3 +2221,325 @@ class WorkOrderTransferTests(APITestCase):
         response = self.transfer(item.serial_number)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WorkOrderCloseTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+        self.work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        self.line_item = WorkOrderLineItemFactory(
+            work_order=self.work_order,
+            product_type=self.product_type,
+            quantity=2,
+        )
+
+    def close(self):
+        return self.client.post(reverse("workorder-close", args=[self.work_order.id]))
+
+    def _out_item(self):
+        return SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+    def test_close_marks_remaining_out_items_missing(self):
+        # AC-1/AC-2/TC-01/TC-02
+        items = [self._out_item() for _ in range(3)]
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 3)
+        self.assertEqual(response.data["work_order"]["status"], WorkOrder.STATUS_CLOSED)
+        for item in items:
+            item.refresh_from_db()
+            self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
+        self.assertEqual(
+            Transaction.objects.filter(
+                transaction_type=Transaction.TYPE_MISSING
+            ).count(),
+            3,
+        )
+
+    def test_close_does_not_clobber_a_written_off_item(self):
+        # A written-off item (admin-settable today) is a resolved terminal
+        # outcome like damaged, not "still out" - close() must not sweep it
+        # back to STATUS_MISSING and destroy the write-off record.
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_WRITTEN_OFF,
+        )
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 0)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_WRITTEN_OFF)
+
+    def test_close_excludes_an_item_transferred_away_to_another_wo(self):
+        # An item transfer()'d off this WO to another one is legitimately
+        # out on the *destination* WO, not lost - close() must not sweep it
+        # into Missing Items just because transfer() never reassigns
+        # work_order_line_item.
+        item = self._out_item()
+        destination = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[self.work_order.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": destination.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 0)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+        self.assertEqual(
+            Transaction.objects.filter(
+                serialized_item=item, transaction_type=Transaction.TYPE_MISSING
+            ).count(),
+            0,
+        )
+
+    def test_close_still_sweeps_an_item_with_unrelated_past_transfer_history(self):
+        # Guards the exclude() fix itself: a plain multi-kwarg
+        # .exclude(transactions__work_order_id=X, transactions__
+        # transaction_type=TRANSFER) doesn't get "same related row"
+        # semantics from Django for a to-many relation (unlike filter()) -
+        # it compiles to two independent EXISTS subqueries ANDed together.
+        # An item transferred between two *other*, unrelated work orders in
+        # the past, then genuinely returned and re-issued fresh on this WO
+        # (never transferred off *this* WO), would be wrongly excluded by
+        # that broken form - it has some transaction of type TRANSFER
+        # (against the old WOs) and some transaction referencing this WO
+        # (the fresh issue), just never both on the same row.
+        old_source = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        old_destination = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=WorkOrderLineItemFactory(
+                work_order=old_source, product_type=self.product_type
+            ),
+            status=SerializedItem.STATUS_OUT,
+        )
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[old_source.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": old_destination.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        # Simulate it eventually coming back and being freshly issued on
+        # this ticket's own work_order.
+        item.status = SerializedItem.STATUS_AVAILABLE
+        item.save(update_fields=["status"])
+        self.line_item.quantity = 1
+        self.line_item.save(update_fields=["quantity"])
+        self.work_order.status = WorkOrder.STATUS_DRAFT
+        self.work_order.save(update_fields=["status"])
+        self.client.post(reverse("workorder-start", args=[self.work_order.id]))
+        self.client.post(
+            reverse("workorder-scan", args=[self.work_order.id]),
+            {"line_item": self.line_item.id, "serial_number": item.serial_number},
+            format="json",
+        )
+        self.client.post(reverse("workorder-complete", args=[self.work_order.id]))
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
+
+    def test_close_sweeps_an_item_reissued_after_arriving_via_transfer(self):
+        # Guards against conflating transfer()'s source-side and
+        # destination-side Transaction rows: this WO was once a transfer
+        # *destination* for the item (its own TYPE_TRANSFER row has
+        # work_order=this_wo too, just from the other side of that call),
+        # so a naive "any TRANSFER row referencing this WO" exclusion would
+        # wrongly skip it here even though it was later genuinely, freshly
+        # re-issued onto this WO and is still out on it right now.
+        origin = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=WorkOrderLineItemFactory(
+                work_order=origin, product_type=self.product_type
+            ),
+            status=SerializedItem.STATUS_OUT,
+        )
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[origin.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": self.work_order.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        # return_item()'s own pre-existing "trusts the stale FK" limitation
+        # (see its comment) lets this succeed on `origin` even though the
+        # item is procedurally on self.work_order now - the FK was never
+        # reassigned by transfer().
+        return_response = self.client.post(
+            reverse("workorder-return-item", args=[origin.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+        self.assertEqual(return_response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+
+        # Now genuinely, freshly re-issued onto this WO.
+        self.line_item.quantity = 1
+        self.line_item.save(update_fields=["quantity"])
+        self.work_order.status = WorkOrder.STATUS_DRAFT
+        self.work_order.save(update_fields=["status"])
+        self.client.post(reverse("workorder-start", args=[self.work_order.id]))
+        self.client.post(
+            reverse("workorder-scan", args=[self.work_order.id]),
+            {"line_item": self.line_item.id, "serial_number": item.serial_number},
+            format="json",
+        )
+        self.client.post(reverse("workorder-complete", args=[self.work_order.id]))
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
+
+    def test_close_a_partially_returned_wo(self):
+        # TC-04
+        items = [self._out_item() for _ in range(2)]
+        self.work_order.status = WorkOrder.STATUS_PARTIALLY_RETURNED
+        self.work_order.save(update_fields=["status"])
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 2)
+        for item in items:
+            item.refresh_from_db()
+            self.assertEqual(item.status, SerializedItem.STATUS_MISSING)
+
+    def test_close_with_zero_items_out_closes_cleanly(self):
+        # AC-4/TC-05: every item already back via the normal return flow -
+        # closing hits zero-out with no items sent to Missing Items.
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_AVAILABLE,
+        )
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 0)
+        self.assertEqual(response.data["work_order"]["status"], WorkOrder.STATUS_CLOSED)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_closed_work_order_is_read_only(self):
+        # AC-3/TC-03: no further scans/returns/transfers against a closed WO.
+        item = self._out_item()
+        self.close()
+
+        scan_response = self.client.post(
+            reverse("workorder-scan", args=[self.work_order.id]),
+            {"line_item": self.line_item.id, "serial_number": "SN-ANYTHING"},
+            format="json",
+        )
+        return_response = self.client.post(
+            reverse("workorder-return-item", args=[self.work_order.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[self.work_order.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": WorkOrderFactory(
+                    status=WorkOrder.STATUS_FULFILLED
+                ).id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(scan_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(return_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(transfer_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_close_rejects_when_work_order_is_draft(self):
+        draft_work_order = WorkOrderFactory()
+
+        response = self.client.post(
+            reverse("workorder-close", args=[draft_work_order.id])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_close_rejects_when_work_order_already_returned(self):
+        # AC-4's note: a fully "returned" WO is already terminal, not
+        # eligible for manual close.
+        self.work_order.status = WorkOrder.STATUS_RETURNED
+        self.work_order.save(update_fields=["status"])
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_close_rejects_when_work_order_already_closed(self):
+        self.work_order.status = WorkOrder.STATUS_CLOSED
+        self.work_order.save(update_fields=["status"])
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_close_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_close_rechecks_work_order_status_after_the_lock_is_acquired(self):
+        # Simulates a concurrent second close() call landing in the window
+        # between the pre-lock status check and select_for_update() -
+        # matches WorkOrderReturnItemTests's identical race-simulation
+        # technique.
+        original_select_for_update = WorkOrder.objects.select_for_update
+        work_order = self.work_order
+
+        def close_then_lock(*args, **kwargs):
+            work_order.status = WorkOrder.STATUS_RETURNED
+            work_order.save(update_fields=["status"])
+            return original_select_for_update(*args, **kwargs)
+
+        with patch.object(WorkOrder.objects, "select_for_update", close_then_lock):
+            response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
