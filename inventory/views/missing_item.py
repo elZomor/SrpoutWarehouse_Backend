@@ -47,11 +47,18 @@ class MissingItemViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def _get_locked_missing_item(self, pk):
         # WRH-28 lesson: select_for_update() paired with select_related()
         # across a nullable FK (work_order_line_item) breaks on Postgres -
-        # lock the bare row only. work_order_line_item is then read lazily
-        # by _resolve() below on every call (success *and* rejection), so
-        # this costs exactly one extra query per resolution, never zero.
+        # lock the bare row only, but still select_related("product_type")
+        # (not part of that nullable join) since _resolve()'s response is
+        # built via SerializedItemSerializer, whose product_type_name field
+        # would otherwise re-query it. work_order_line_item itself is read
+        # lazily by _resolve() below, only on the success path (the
+        # rejection branch returns before touching it).
         try:
-            return SerializedItem.objects.select_for_update().get(pk=pk)
+            return (
+                SerializedItem.objects.select_for_update()
+                .select_related("product_type")
+                .get(pk=pk)
+            )
         except SerializedItem.DoesNotExist:
             raise Http404
 
