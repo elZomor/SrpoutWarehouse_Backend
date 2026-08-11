@@ -10,6 +10,13 @@ from inventory.models.product_type import ProductType
 from inventory.models.purchase_order_line_item import PurchaseOrderLineItem
 from inventory.models.work_order_line_item import WorkOrderLineItem
 
+# WRH-42/AC-1: the Missing Items list's "date missing" column - shared
+# between MissingItemViewSet.get_queryset() (the annotate() that computes it)
+# and MissingItemSerializer (the getattr() that reads it back), matching
+# ProductType's identical *_COUNT_ANNOTATION convention for the same
+# "name it once, read it from both sides" reason.
+DATE_MISSING_ANNOTATION = "date_missing"
+
 
 class SerializedItem(models.Model):
     SEARCH_FIELDS = ("serial_number",)
