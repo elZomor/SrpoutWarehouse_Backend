@@ -99,6 +99,32 @@ class MissingItemListTests(MissingItemTestsBase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_list_shows_supplementary_wo_reference_format(self):
+        # AC-1/TC-04: a missing item originating from a supplementary WO
+        # must show "WO-<parent>-S<seq>" (WorkOrderSerializer's own display
+        # convention), not a plain "WO-<id>" - close() has no restriction
+        # against closing a supplementary WO.
+        supplementary = WorkOrderFactory(
+            status=WorkOrder.STATUS_FULFILLED,
+            parent_work_order=self.work_order,
+            supplementary_sequence=1,
+        )
+        supplementary_line_item = WorkOrderLineItemFactory(
+            work_order=supplementary,
+            product_type=self.product_type,
+            quantity=1,
+        )
+        self._close_work_order_with_missing_item(
+            work_order=supplementary, line_item=supplementary_line_item
+        )
+
+        response = self.client.get(reverse("missing-item-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        entry = response.data[0]
+        self.assertEqual(entry["work_order_id"], supplementary.id)
+        self.assertEqual(entry["work_order_reference"], f"WO-{self.work_order.id}-S1")
+
 
 class MissingItemMarkFoundTests(MissingItemTestsBase):
     def test_mark_found_creates_return_transaction_and_frees_stock(self):

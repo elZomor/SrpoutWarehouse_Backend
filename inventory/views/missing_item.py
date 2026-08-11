@@ -22,7 +22,10 @@ class MissingItemViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def get_queryset(self):
         # select_related avoids an N+1 for product_type_name/work_order_* per
         # row (matches SerializedItemViewSet's own product_type
-        # select_related). The Max() annotation folds "most recent MISSING
+        # select_related) - the second-level __work_order join is genuinely
+        # read by get_work_order_reference() (parent_work_order_id/
+        # supplementary_sequence via _work_order_reference()), not just the
+        # bare FK id. The Max() annotation folds "most recent MISSING
         # transaction for this item" into the same query rather than one
         # extra query per row - matches ProductType's *_COUNT_ANNOTATION
         # convention (see DATE_MISSING_ANNOTATION's own comment).
@@ -44,13 +47,48 @@ class MissingItemViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def _get_locked_missing_item(self, pk):
         # WRH-28 lesson: select_for_update() paired with select_related()
         # across a nullable FK (work_order_line_item) breaks on Postgres -
-        # lock the bare row only; the rare "not missing" rejection path
-        # below is the only place that reads the FK, so it costs one lazy
-        # follow-up query only when actually hit.
+        # lock the bare row only. work_order_line_item is then read lazily
+        # by _resolve() below on every call (success *and* rejection), so
+        # this costs exactly one extra query per resolution, never zero.
         try:
             return SerializedItem.objects.select_for_update().get(pk=pk)
         except SerializedItem.DoesNotExist:
             raise Http404
+
+    def _resolve(self, request, pk, target_status, transaction_type):
+        # Shared by mark_found()/write_off() below - AC-3 and AC-4 are the
+        # same shape (lock, re-check still-missing, flip status, log a
+        # Transaction) differing only in the target status/transaction type,
+        # so keeping one implementation avoids the two drifting apart (e.g.
+        # a future fix to the WO-reference logic only needing to land once).
+        with transaction.atomic():
+            item = self._get_locked_missing_item(pk)
+            if item.status != SerializedItem.STATUS_MISSING:
+                raise ValidationError(
+                    {"status": [f"{item.serial_number} is not currently missing."]}
+                )
+            item.status = target_status
+            item.save(update_fields=["status"])
+
+            # Transaction.reference_number intentionally stays the bare
+            # "WO-<id>" form here, not the supplementary-aware
+            # _work_order_reference() the serializer uses for display -
+            # matches every other Transaction.reference_number write in this
+            # codebase (close()/return_item()/etc., see
+            # _work_order_reference()'s own comment on this exact split).
+            work_order_id = (
+                item.work_order_line_item.work_order_id
+                if item.work_order_line_item_id
+                else None
+            )
+            Transaction.objects.create(
+                transaction_type=transaction_type,
+                serialized_item=item,
+                work_order_id=work_order_id,
+                reference_number=f"WO-{work_order_id}" if work_order_id else "",
+                user=request.user,
+            )
+        return Response(SerializedItemSerializer(item).data, status=200)
 
     @action(detail=True, methods=["post"], url_path="mark-found")
     def mark_found(self, request, pk=None):
@@ -59,28 +97,9 @@ class MissingItemViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         # close() ever sets STATUS_MISSING) - matches return_item()'s "don't
         # clear work_order_line_item" convention, no WO status re-derivation
         # needed since a closed WO stays closed.
-        with transaction.atomic():
-            item = self._get_locked_missing_item(pk)
-            if item.status != SerializedItem.STATUS_MISSING:
-                raise ValidationError(
-                    {"status": [f"{item.serial_number} is not currently missing."]}
-                )
-            item.status = SerializedItem.STATUS_AVAILABLE
-            item.save(update_fields=["status"])
-
-            work_order_id = (
-                item.work_order_line_item.work_order_id
-                if item.work_order_line_item_id
-                else None
-            )
-            Transaction.objects.create(
-                transaction_type=Transaction.TYPE_RETURN,
-                serialized_item=item,
-                work_order_id=work_order_id,
-                reference_number=f"WO-{work_order_id}" if work_order_id else "",
-                user=request.user,
-            )
-        return Response(SerializedItemSerializer(item).data, status=200)
+        return self._resolve(
+            request, pk, SerializedItem.STATUS_AVAILABLE, Transaction.TYPE_RETURN
+        )
 
     @action(detail=True, methods=["post"], url_path="write-off")
     def write_off(self, request, pk=None):
@@ -89,25 +108,6 @@ class MissingItemViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         # already subtracts STATUS_WRITTEN_OFF (WRH-48), and close()'s own
         # NOT_STILL_OUT_STATUSES already protects a written-off item from
         # being clobbered back to missing.
-        with transaction.atomic():
-            item = self._get_locked_missing_item(pk)
-            if item.status != SerializedItem.STATUS_MISSING:
-                raise ValidationError(
-                    {"status": [f"{item.serial_number} is not currently missing."]}
-                )
-            item.status = SerializedItem.STATUS_WRITTEN_OFF
-            item.save(update_fields=["status"])
-
-            work_order_id = (
-                item.work_order_line_item.work_order_id
-                if item.work_order_line_item_id
-                else None
-            )
-            Transaction.objects.create(
-                transaction_type=Transaction.TYPE_WRITTEN_OFF,
-                serialized_item=item,
-                work_order_id=work_order_id,
-                reference_number=f"WO-{work_order_id}" if work_order_id else "",
-                user=request.user,
-            )
-        return Response(SerializedItemSerializer(item).data, status=200)
+        return self._resolve(
+            request, pk, SerializedItem.STATUS_WRITTEN_OFF, Transaction.TYPE_WRITTEN_OFF
+        )
