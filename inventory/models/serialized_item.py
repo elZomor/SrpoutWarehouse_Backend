@@ -36,6 +36,11 @@ class SerializedItem(models.Model):
     # rejection logic below has a real status to check against.
     STATUS_DAMAGED = "damaged"
     STATUS_MISSING = "missing"
+    # WRH-45/AC-1: Direct Damage Report's status-specific rejection needs a
+    # real value to check/display for this status, same "exists before any
+    # endpoint sets it" reasoning as STATUS_WRITTEN_OFF below - the
+    # in-maintenance workflow itself (what would set this) is unbuilt.
+    STATUS_IN_MAINTENANCE = "in_maintenance"
     # WRH-48/AC-2: the stock dashboard's Available formula needs a real
     # status to subtract, the same way STATUS_DAMAGED/STATUS_MISSING existed
     # before any endpoint set them - nothing yet sets an item to
@@ -49,6 +54,7 @@ class SerializedItem(models.Model):
         (STATUS_OUT, "Out"),
         (STATUS_DAMAGED, "Damaged"),
         (STATUS_MISSING, "Missing"),
+        (STATUS_IN_MAINTENANCE, "In maintenance"),
         (STATUS_WRITTEN_OFF, "Written off"),
     ]
 
