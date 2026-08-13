@@ -154,6 +154,8 @@ class MissingItemMarkFoundTests(MissingItemTestsBase):
         self.assertEqual(len(response.data), 0)
 
     def test_mark_found_rejects_an_item_that_is_not_missing(self):
+        # WRH-43/AC-2/TC-03; an available item is also "already resolved via
+        # Mark as Found" (TC-01's scenario), covered by the same assertion.
         item = SerializedItemFactory(
             product_type=self.product_type, status=SerializedItem.STATUS_AVAILABLE
         )
@@ -161,6 +163,20 @@ class MissingItemMarkFoundTests(MissingItemTestsBase):
         response = self.client.post(reverse("missing-item-mark-found", args=[item.id]))
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mark_found_rejects_an_already_written_off_item(self):
+        # WRH-43/AC-1/TC-02: a distinct "already resolved" case from the
+        # already-available one above - written_off is itself a resolution
+        # outcome, not just "some other non-missing status".
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_WRITTEN_OFF
+        )
+
+        response = self.client.post(reverse("missing-item-mark-found", args=[item.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_WRITTEN_OFF)
 
     def test_mark_found_returns_404_for_unknown_item(self):
         response = self.client.post(reverse("missing-item-mark-found", args=[999999]))
@@ -204,6 +220,8 @@ class MissingItemWriteOffTests(MissingItemTestsBase):
         self.assertEqual(len(response.data), 0)
 
     def test_write_off_rejects_an_item_that_is_not_missing(self):
+        # WRH-43/AC-3/TC-01: an available item is also "already resolved via
+        # Mark as Found" (TC-01's scenario), covered by the same assertion.
         item = SerializedItemFactory(
             product_type=self.product_type, status=SerializedItem.STATUS_AVAILABLE
         )
@@ -211,6 +229,21 @@ class MissingItemWriteOffTests(MissingItemTestsBase):
         response = self.client.post(reverse("missing-item-write-off", args=[item.id]))
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_write_off_rejects_an_already_written_off_item(self):
+        # WRH-43/AC-1/TC-02: a distinct "already resolved" case from the
+        # already-available one above - matches
+        # test_mark_found_rejects_an_already_written_off_item's identical
+        # reasoning for the sibling action.
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_WRITTEN_OFF
+        )
+
+        response = self.client.post(reverse("missing-item-write-off", args=[item.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_WRITTEN_OFF)
 
     def test_write_off_requires_authentication(self):
         item = self._close_work_order_with_missing_item()
