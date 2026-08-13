@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from inventory.views import (
     BoxViewSet,
     CategoryViewSet,
+    DamageReportViewSet,
     LoginView,
     LogoutView,
     MeView,
@@ -24,6 +25,7 @@ router.register("work-orders", WorkOrderViewSet)
 router.register("transactions", TransactionViewSet)
 router.register("boxes", BoxViewSet)
 router.register("missing-items", MissingItemViewSet, basename="missing-item")
+router.register("damage-reports", DamageReportViewSet)
 
 urlpatterns = [
     path("auth/login/", LoginView.as_view(), name="login"),

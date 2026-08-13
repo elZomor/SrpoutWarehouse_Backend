@@ -1,5 +1,6 @@
 from inventory.models.box import Box
 from inventory.models.category import Category
+from inventory.models.damage_report import DamageReport
 from inventory.models.product_type import ProductType
 from inventory.models.purchase_order import PurchaseOrder
 from inventory.models.purchase_order_line_item import PurchaseOrderLineItem
@@ -11,6 +12,7 @@ from inventory.models.work_order_line_item import WorkOrderLineItem
 __all__ = [
     "Box",
     "Category",
+    "DamageReport",
     "ProductType",
     "PurchaseOrder",
     "PurchaseOrderLineItem",

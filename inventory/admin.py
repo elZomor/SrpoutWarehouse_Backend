@@ -3,6 +3,7 @@ from django.contrib import admin
 from inventory.models import (
     Box,
     Category,
+    DamageReport,
     ProductType,
     PurchaseOrder,
     PurchaseOrderLineItem,
@@ -65,6 +66,12 @@ class WorkOrderAdmin(admin.ModelAdmin):
     list_filter = ("status",)
     search_fields = ("job_name", "client_name")
     inlines = [WorkOrderLineItemInline]
+
+
+@admin.register(DamageReport)
+class DamageReportAdmin(admin.ModelAdmin):
+    list_display = ("id", "serialized_item", "user", "created_at")
+    search_fields = ("serialized_item__serial_number",)
 
 
 @admin.register(Transaction)
