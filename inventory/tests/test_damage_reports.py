@@ -82,12 +82,43 @@ class DamageReportCreateTests(APITestCase):
         self.assertEqual(references, ["DR-0001", "DR-0002", "DR-0003"])
 
     def test_rejects_an_unknown_serial_number(self):
+        # AC-3/TC-05
         response = self.create("SN-does-not-exist")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["serial_number"], ["Serial not found"])
         self.assertEqual(DamageReport.objects.count(), 0)
 
-    def test_rejects_an_item_that_is_not_available(self):
+    def test_requires_a_serial_number(self):
+        # AC-2/TC-04
+        response = self.client.post(reverse("damagereport-list"), {})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["serial_number"], ["Serial number is required."])
+        self.assertEqual(DamageReport.objects.count(), 0)
+
+    def test_rejects_an_item_that_is_out(self):
+        # AC-1/TC-01
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_OUT
+        )
+
+        response = self.create(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [
+                f"{item.serial_number} is currently out "
+                "and cannot be reported damaged directly"
+            ],
+        )
+        self.assertEqual(DamageReport.objects.count(), 0)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+    def test_rejects_an_item_that_is_already_damaged(self):
+        # AC-1/TC-02
         item = SerializedItemFactory(
             product_type=self.product_type, status=SerializedItem.STATUS_DAMAGED
         )
@@ -95,6 +126,68 @@ class DamageReportCreateTests(APITestCase):
         response = self.create(item.serial_number)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [
+                f"{item.serial_number} is currently damaged "
+                "and cannot be reported damaged directly"
+            ],
+        )
+        self.assertEqual(DamageReport.objects.count(), 0)
+
+    def test_rejects_a_missing_item(self):
+        # AC-1/TC-03
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_MISSING
+        )
+
+        response = self.create(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [
+                f"{item.serial_number} is currently missing "
+                "and cannot be reported damaged directly"
+            ],
+        )
+        self.assertEqual(DamageReport.objects.count(), 0)
+
+    def test_rejects_an_item_in_maintenance(self):
+        # AC-1
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            status=SerializedItem.STATUS_IN_MAINTENANCE,
+        )
+
+        response = self.create(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [
+                f"{item.serial_number} is currently in maintenance "
+                "and cannot be reported damaged directly"
+            ],
+        )
+        self.assertEqual(DamageReport.objects.count(), 0)
+
+    def test_rejects_a_written_off_item(self):
+        # AC-1
+        item = SerializedItemFactory(
+            product_type=self.product_type, status=SerializedItem.STATUS_WRITTEN_OFF
+        )
+
+        response = self.create(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["serial_number"],
+            [
+                f"{item.serial_number} is currently written off "
+                "and cannot be reported damaged directly"
+            ],
+        )
         self.assertEqual(DamageReport.objects.count(), 0)
 
     def test_requires_authentication(self):

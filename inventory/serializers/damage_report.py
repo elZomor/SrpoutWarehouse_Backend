@@ -32,12 +32,23 @@ class DamageReportSerializer(serializers.ModelSerializer):
         ]
 
 
-def _unknown_serial_message(serial_number):
-    return f"Serial number {serial_number} was not found."
+# WRH-45/AC-3: matches the plain "Serial not found" literal WorkOrderViewSet's
+# scan()/return_item()/transfer() already use for the identical rejection
+# (see _unavailable_item_message's sibling literal in views/work_order.py) -
+# no serial_number embedded, so no end-anchoring is needed for this one.
+NOT_FOUND_MESSAGE = "Serial not found"
 
 
 def _not_available_message(item):
-    return f"{item.serial_number} is not available to report as damaged."
+    # WRH-45/AC-1: status-specific reason, matching
+    # _unavailable_item_message's identical per-status convention in
+    # views/work_order.py - get_status_display() already lower-cases to the
+    # exact word each STATUS_CHOICES label reads as ("out", "damaged",
+    # "missing", "in maintenance", "written off").
+    return (
+        f"{item.serial_number} is currently {item.get_status_display().lower()} "
+        "and cannot be reported damaged directly"
+    )
 
 
 class DamageReportCreateSerializer(serializers.Serializer):
@@ -63,7 +74,7 @@ class DamageReportCreateSerializer(serializers.Serializer):
         try:
             item = SerializedItem.objects.get(serial_number=value)
         except SerializedItem.DoesNotExist:
-            raise serializers.ValidationError(_unknown_serial_message(value))
+            raise serializers.ValidationError(NOT_FOUND_MESSAGE)
         if item.status != SerializedItem.STATUS_AVAILABLE:
             raise serializers.ValidationError(_not_available_message(item))
         return value
@@ -87,7 +98,7 @@ class DamageReportCreateSerializer(serializers.Serializer):
                 )
             except SerializedItem.DoesNotExist:
                 raise serializers.ValidationError(
-                    {"serial_number": [_unknown_serial_message(serial_number)]}
+                    {"serial_number": [NOT_FOUND_MESSAGE]}
                 )
             if item.status != SerializedItem.STATUS_AVAILABLE:
                 raise serializers.ValidationError(
