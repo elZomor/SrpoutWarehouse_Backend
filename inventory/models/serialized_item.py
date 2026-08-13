@@ -6,6 +6,7 @@ from django.db import models
 import qrcode
 
 from inventory.models.box import Box
+from inventory.models.maintenance_order import MaintenanceOrder
 from inventory.models.product_type import ProductType
 from inventory.models.purchase_order_line_item import PurchaseOrderLineItem
 from inventory.models.work_order_line_item import WorkOrderLineItem
@@ -93,6 +94,18 @@ class SerializedItem(models.Model):
     # only, no history" design.
     box = models.ForeignKey(
         Box,
+        on_delete=models.PROTECT,
+        related_name="items",
+        null=True,
+        blank=True,
+    )
+    # WRH-46/AC-1: set when this item is selected onto a Maintenance Order
+    # at creation time (MaintenanceOrderSerializer.create()) - PROTECT for
+    # the same "shouldn't vanish out from under it" reason as box/
+    # work_order_line_item above; nothing clears this once set, matching
+    # box's identical "current claim only, no history" design.
+    maintenance_order = models.ForeignKey(
+        MaintenanceOrder,
         on_delete=models.PROTECT,
         related_name="items",
         null=True,

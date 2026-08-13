@@ -2,6 +2,7 @@ from inventory.views.auth import LoginView, LogoutView, MeView
 from inventory.views.box import BoxViewSet
 from inventory.views.category import CategoryViewSet
 from inventory.views.damage_report import DamageReportViewSet
+from inventory.views.maintenance_order import MaintenanceOrderViewSet
 from inventory.views.missing_item import MissingItemViewSet
 from inventory.views.product_type import ProductTypeViewSet
 from inventory.views.purchase_order import PurchaseOrderViewSet
@@ -16,6 +17,7 @@ __all__ = [
     "BoxViewSet",
     "CategoryViewSet",
     "DamageReportViewSet",
+    "MaintenanceOrderViewSet",
     "MissingItemViewSet",
     "ProductTypeViewSet",
     "PurchaseOrderViewSet",

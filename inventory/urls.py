@@ -7,6 +7,7 @@ from inventory.views import (
     DamageReportViewSet,
     LoginView,
     LogoutView,
+    MaintenanceOrderViewSet,
     MeView,
     MissingItemViewSet,
     ProductTypeViewSet,
@@ -26,6 +27,7 @@ router.register("transactions", TransactionViewSet)
 router.register("boxes", BoxViewSet)
 router.register("missing-items", MissingItemViewSet, basename="missing-item")
 router.register("damage-reports", DamageReportViewSet)
+router.register("maintenance-orders", MaintenanceOrderViewSet)
 
 urlpatterns = [
     path("auth/login/", LoginView.as_view(), name="login"),

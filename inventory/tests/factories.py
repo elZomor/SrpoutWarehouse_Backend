@@ -7,6 +7,7 @@ from inventory.models import (
     Box,
     Category,
     DamageReport,
+    MaintenanceOrder,
     ProductType,
     PurchaseOrder,
     PurchaseOrderLineItem,
@@ -115,3 +116,8 @@ class DamageReportFactory(factory.django.DjangoModelFactory):
     serialized_item = factory.SubFactory(SerializedItemFactory)
     user = factory.SubFactory(UserFactory)
     note = ""
+
+
+class MaintenanceOrderFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = MaintenanceOrder
