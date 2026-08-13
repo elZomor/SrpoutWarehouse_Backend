@@ -1,10 +1,19 @@
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from inventory.models import MaintenanceOrder, SerializedItem
-from inventory.tests.factories import MaintenanceOrderFactory, SerializedItemFactory
+from inventory.tests.factories import (
+    BoxFactory,
+    MaintenanceOrderFactory,
+    ProductTypeFactory,
+    SerializedItemFactory,
+    WorkOrderFactory,
+    WorkOrderLineItemFactory,
+)
 
 
 class MaintenanceOrderCreationTests(APITestCase):
@@ -74,6 +83,108 @@ class MaintenanceOrderCreationTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
+
+    def test_create_mo_rejects_an_item_already_on_another_maintenance_order(self):
+        item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        first_response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+
+        second_item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        second_response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id, second_item.id]},
+            format="json",
+        )
+
+        self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            second_response.data["item_ids"],
+            [f"{item.serial_number} is already on maintenance order MO-0001"],
+        )
+        second_item.refresh_from_db()
+        self.assertIsNone(second_item.maintenance_order_id)
+
+    def test_create_mo_rejects_an_item_already_in_a_box(self):
+        product_type = ProductTypeFactory()
+        box = BoxFactory(product_type=product_type)
+        item = SerializedItemFactory(
+            product_type=product_type,
+            status=SerializedItem.STATUS_DAMAGED,
+            box=box,
+        )
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_ids"],
+            [f"{item.serial_number} is already in box {box.code}"],
+        )
+
+    def test_create_mo_rejects_an_item_claimed_on_a_work_order(self):
+        work_order = WorkOrderFactory()
+        line_item = WorkOrderLineItemFactory(work_order=work_order)
+        item = SerializedItemFactory(
+            product_type=line_item.product_type,
+            status=SerializedItem.STATUS_DAMAGED,
+            work_order_line_item=line_item,
+        )
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_ids"],
+            [f"{item.serial_number} is already claimed on a work order"],
+        )
+
+    def test_create_mo_requires_at_least_one_item(self):
+        response = self.client.post(
+            reverse("maintenanceorder-list"), {"item_ids": []}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["item_ids"], ["Select at least one item."])
+
+    def test_create_mo_rechecks_claims_after_lock_is_acquired(self):
+        # The item_ids field/validate() check above only catches a claim
+        # that already exists pre-lock - simulate a concurrent claim landing
+        # in the window between that check and create()'s
+        # select_for_update()-guarded re-fetch, matching
+        # BoxSerializer.create()'s identical regression test shape (WRH-27).
+        item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        other_box = BoxFactory()
+        original_select_for_update = SerializedItem.objects.select_for_update
+
+        def claim_then_lock(*args, **kwargs):
+            item.box = other_box
+            item.save(update_fields=["box"])
+            return original_select_for_update(*args, **kwargs)
+
+        with patch.object(SerializedItem.objects, "select_for_update", claim_then_lock):
+            response = self.client.post(
+                reverse("maintenanceorder-list"),
+                {"item_ids": [item.id]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("item_ids", response.data)
+        self.assertFalse(MaintenanceOrder.objects.exists())
+        item.refresh_from_db()
+        self.assertIsNone(item.maintenance_order_id)
 
     def test_create_mo_requires_authentication(self):
         self.client.logout()

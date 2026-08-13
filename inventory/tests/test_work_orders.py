@@ -1149,6 +1149,23 @@ class WorkOrderReturnItemTests(APITestCase):
         items[1].refresh_from_db()
         self.assertEqual(items[1].status, SerializedItem.STATUS_WRITTEN_OFF)
 
+    def test_wo_reaches_returned_status_with_an_in_maintenance_item_outstanding(self):
+        # WRH-46: NOT_STILL_OUT_STATUSES (shared with close()) now also
+        # excludes STATUS_IN_MAINTENANCE, matching STATUS_WRITTEN_OFF's
+        # identical "resolved, doesn't block reaching returned" precedent
+        # right above - an item pulled onto a Maintenance Order mid-WO is
+        # a resolved outcome for this WO, not still pending on it.
+        items = [self._out_item() for _ in range(2)]
+        items[1].status = SerializedItem.STATUS_IN_MAINTENANCE
+        items[1].save(update_fields=["status"])
+
+        response = self.return_item(items[0].serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        items[1].refresh_from_db()
+        self.assertEqual(items[1].status, SerializedItem.STATUS_IN_MAINTENANCE)
+
     def test_return_rejects_an_item_issued_on_a_different_work_order(self):
         other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
         other_line_item = WorkOrderLineItemFactory(
@@ -2282,6 +2299,23 @@ class WorkOrderCloseTests(APITestCase):
         self.assertEqual(response.data["missing_count"], 0)
         item.refresh_from_db()
         self.assertEqual(item.status, SerializedItem.STATUS_WRITTEN_OFF)
+
+    def test_close_does_not_clobber_an_in_maintenance_item(self):
+        # WRH-46: an item pulled onto a Maintenance Order mid-WO is a
+        # resolved-for-this-WO outcome like written-off - close() must not
+        # sweep it back to STATUS_MISSING and destroy the maintenance claim.
+        item = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.line_item,
+            status=SerializedItem.STATUS_IN_MAINTENANCE,
+        )
+
+        response = self.close()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["missing_count"], 0)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_IN_MAINTENANCE)
 
     def test_close_excludes_an_item_transferred_away_to_another_wo(self):
         # An item transfer()'d off this WO to another one is legitimately
