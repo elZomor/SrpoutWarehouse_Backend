@@ -47,24 +47,23 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
     @staticmethod
     def _validate_item(item):
         # Not the "only damaged items eligible" business rule (WRH-47's
-        # scope) - these guard against silently clobbering a claim this
-        # item already has elsewhere, the same structural corruption
-        # BoxSerializer._validate_item's "already in another box" check
-        # guards against for its own claim FK.
+        # scope) - this guards against silently clobbering a claim this
+        # item already has on another MaintenanceOrder, the same structural
+        # corruption BoxSerializer._validate_item's "already in another box"
+        # check guards against for its own claim FK. Deliberately does NOT
+        # check item.box_id: unlike work_order_line_item (below) and this
+        # model's own FK, Box membership is a permanent, orthogonal physical
+        # tag, not a competing claim - a boxed item can legitimately also be
+        # damaged and go to maintenance (see WorkOrderViewSet.return_box()'s
+        # "boxed item marked damaged mid-box" handling), so box_id being set
+        # must not block it. An earlier version of this check treated box_id
+        # as a live claim and wrongly rejected every ever-boxed item.
         if item.maintenance_order_id is not None:
             raise serializers.ValidationError(
                 {
                     "item_ids": [
                         f"{item.serial_number} is already on maintenance order"
                         f" {item.maintenance_order.reference}"
-                    ]
-                }
-            )
-        if item.box_id is not None:
-            raise serializers.ValidationError(
-                {
-                    "item_ids": [
-                        f"{item.serial_number} is already in box {item.box.code}"
                     ]
                 }
             )

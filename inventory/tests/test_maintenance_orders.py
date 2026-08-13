@@ -108,7 +108,14 @@ class MaintenanceOrderCreationTests(APITestCase):
         second_item.refresh_from_db()
         self.assertIsNone(second_item.maintenance_order_id)
 
-    def test_create_mo_rejects_an_item_already_in_a_box(self):
+    def test_create_mo_accepts_a_damaged_item_that_is_still_boxed(self):
+        # Box membership is a permanent, orthogonal physical tag (nothing
+        # ever clears SerializedItem.box), not a competing claim - a boxed
+        # item marked damaged mid-box (WorkOrderViewSet.return_box()'s own
+        # handling) must still be eligible for an MO. Regression test for a
+        # bug caught in review: box_id's mere presence must not be mistaken
+        # for a live claim, the same class of bug fixed for
+        # work_order_line_item_id above.
         product_type = ProductTypeFactory()
         box = BoxFactory(product_type=product_type)
         item = SerializedItemFactory(
@@ -123,11 +130,10 @@ class MaintenanceOrderCreationTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["item_ids"],
-            [f"{item.serial_number} is already in box {box.code}"],
-        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_IN_MAINTENANCE)
+        self.assertEqual(item.box_id, box.id)
 
     def test_create_mo_rejects_an_item_currently_out_on_a_work_order(self):
         work_order = WorkOrderFactory()
@@ -190,12 +196,11 @@ class MaintenanceOrderCreationTests(APITestCase):
         # select_for_update()-guarded re-fetch, matching
         # BoxSerializer.create()'s identical regression test shape (WRH-27).
         item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
-        other_box = BoxFactory()
         original_select_for_update = SerializedItem.objects.select_for_update
 
         def claim_then_lock(*args, **kwargs):
-            item.box = other_box
-            item.save(update_fields=["box"])
+            item.status = SerializedItem.STATUS_OUT
+            item.save(update_fields=["status"])
             return original_select_for_update(*args, **kwargs)
 
         with patch.object(SerializedItem.objects, "select_for_update", claim_then_lock):
