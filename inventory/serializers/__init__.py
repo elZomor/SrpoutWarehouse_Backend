@@ -1,6 +1,10 @@
 from inventory.serializers.auth import LoginSerializer, UserSerializer
 from inventory.serializers.box import BoxSerializer
 from inventory.serializers.category import CategorySerializer
+from inventory.serializers.damage_report import (
+    DamageReportCreateSerializer,
+    DamageReportSerializer,
+)
 from inventory.serializers.missing_item import MissingItemSerializer
 from inventory.serializers.product_type import ProductTypeSerializer
 from inventory.serializers.product_type_stock_summary import (
@@ -31,6 +35,8 @@ __all__ = [
     "UserSerializer",
     "BoxSerializer",
     "CategorySerializer",
+    "DamageReportCreateSerializer",
+    "DamageReportSerializer",
     "MissingItemSerializer",
     "ProductTypeSerializer",
     "ProductTypeStockSummarySerializer",

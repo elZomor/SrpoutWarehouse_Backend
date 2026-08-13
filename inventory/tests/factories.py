@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from inventory.models import (
     Box,
     Category,
+    DamageReport,
     ProductType,
     PurchaseOrder,
     PurchaseOrderLineItem,
@@ -104,4 +105,13 @@ class TransactionFactory(factory.django.DjangoModelFactory):
     serialized_item = factory.SubFactory(SerializedItemFactory)
     user = factory.SubFactory(UserFactory)
     reference_number = ""
+    note = ""
+
+
+class DamageReportFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = DamageReport
+
+    serialized_item = factory.SubFactory(SerializedItemFactory)
+    user = factory.SubFactory(UserFactory)
     note = ""
