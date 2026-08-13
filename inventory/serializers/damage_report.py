@@ -75,8 +75,15 @@ class DamageReportCreateSerializer(serializers.Serializer):
 
         with transaction.atomic():
             try:
-                item = SerializedItem.objects.select_for_update().get(
-                    serial_number=serial_number
+                # select_related("product_type") - not part of any nullable
+                # join (unlike WRH-28's work_order_line_item case), and the
+                # response is rendered through DamageReportSerializer
+                # (product_type_name), which would otherwise re-query it on
+                # every create call.
+                item = (
+                    SerializedItem.objects.select_for_update()
+                    .select_related("product_type")
+                    .get(serial_number=serial_number)
                 )
             except SerializedItem.DoesNotExist:
                 raise serializers.ValidationError(
