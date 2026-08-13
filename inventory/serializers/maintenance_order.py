@@ -68,11 +68,21 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
                     ]
                 }
             )
-        if item.work_order_line_item_id is not None:
+        # WorkOrderLineItem's own comment: "current claim only, no history" -
+        # work_order_line_item_id stays set forever once an item is ever
+        # issued, even long after return_item() flips it back to available.
+        # So the *current* claim has to be read off status
+        # (reserved/out), not FK presence - an item that cycled through a
+        # WO and came back (e.g. now damaged) is fully eligible for an MO
+        # and must not be rejected just because it has WO history.
+        if item.status in (
+            SerializedItem.STATUS_RESERVED,
+            SerializedItem.STATUS_OUT,
+        ):
             raise serializers.ValidationError(
                 {
                     "item_ids": [
-                        f"{item.serial_number} is already claimed on a work order"
+                        f"{item.serial_number} is currently claimed on a work order"
                     ]
                 }
             )

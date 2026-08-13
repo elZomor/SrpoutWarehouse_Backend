@@ -129,7 +129,34 @@ class MaintenanceOrderCreationTests(APITestCase):
             [f"{item.serial_number} is already in box {box.code}"],
         )
 
-    def test_create_mo_rejects_an_item_claimed_on_a_work_order(self):
+    def test_create_mo_rejects_an_item_currently_out_on_a_work_order(self):
+        work_order = WorkOrderFactory()
+        line_item = WorkOrderLineItemFactory(work_order=work_order)
+        item = SerializedItemFactory(
+            product_type=line_item.product_type,
+            status=SerializedItem.STATUS_OUT,
+            work_order_line_item=line_item,
+        )
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_ids"],
+            [f"{item.serial_number} is currently claimed on a work order"],
+        )
+
+    def test_create_mo_accepts_a_damaged_item_with_past_work_order_history(self):
+        # work_order_line_item is a "current claim only, no history" FK that
+        # return_item() never clears - a damaged item that was issued and
+        # returned on a WO long ago still carries that FK, but is fully
+        # eligible for an MO per AC-1 (status "damaged" is all that
+        # matters). Regression test for a bug caught in review: the FK's
+        # mere presence must not be mistaken for a live claim.
         work_order = WorkOrderFactory()
         line_item = WorkOrderLineItemFactory(work_order=work_order)
         item = SerializedItemFactory(
@@ -144,11 +171,9 @@ class MaintenanceOrderCreationTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["item_ids"],
-            [f"{item.serial_number} is already claimed on a work order"],
-        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_IN_MAINTENANCE)
 
     def test_create_mo_requires_at_least_one_item(self):
         response = self.client.post(
