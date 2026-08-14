@@ -5,7 +5,10 @@ from inventory.serializers.damage_report import (
     DamageReportCreateSerializer,
     DamageReportSerializer,
 )
-from inventory.serializers.maintenance_order import MaintenanceOrderSerializer
+from inventory.serializers.maintenance_order import (
+    MaintenanceOrderResolveSerializer,
+    MaintenanceOrderSerializer,
+)
 from inventory.serializers.missing_item import MissingItemSerializer
 from inventory.serializers.product_type import ProductTypeSerializer
 from inventory.serializers.product_type_stock_summary import (
@@ -38,6 +41,7 @@ __all__ = [
     "CategorySerializer",
     "DamageReportCreateSerializer",
     "DamageReportSerializer",
+    "MaintenanceOrderResolveSerializer",
     "MaintenanceOrderSerializer",
     "MissingItemSerializer",
     "ProductTypeSerializer",

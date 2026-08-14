@@ -2,13 +2,16 @@ from django.db import models
 
 
 class MaintenanceOrder(models.Model):
-    # WRH-46/AC-1: creation-time status only - resolving individual line
-    # items (fixed/not_fixable) is US-022c/WRH-47's separate workflow, split
-    # from this story per the ticket's re-slice note, so no other status
-    # value exists yet for this model to reach.
+    # WRH-46/AC-1: creation-time status. WRH-58/AC-3 adds the two states
+    # this MO reaches as its line items get resolved - "open" (creation
+    # default) stays until the first item is resolved.
     STATUS_OPEN = "open"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_COMPLETED = "completed"
     STATUS_CHOICES = [
         (STATUS_OPEN, "Open"),
+        (STATUS_IN_PROGRESS, "In progress"),
+        (STATUS_COMPLETED, "Completed"),
     ]
 
     status = models.CharField(

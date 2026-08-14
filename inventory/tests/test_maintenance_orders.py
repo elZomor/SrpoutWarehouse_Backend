@@ -240,3 +240,161 @@ class MaintenanceOrderCreationTests(APITestCase):
         self.assertEqual(
             self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND
         )
+
+
+class MaintenanceOrderResolveTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+
+    @staticmethod
+    def _resolve_url(maintenance_order):
+        return f"/api/maintenance-orders/{maintenance_order.id}/resolve/"
+
+    def _create_mo(self, count):
+        items = [
+            SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+            for _ in range(count)
+        ]
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id for item in items]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        maintenance_order = MaintenanceOrder.objects.get(pk=response.data["id"])
+        return maintenance_order, items
+
+    def test_mark_a_line_item_as_fixed(self):
+        # TC-01/AC-1/AC-3: item -> "available"; MO -> "in_progress" since
+        # only one of three items is resolved.
+        maintenance_order, items = self._create_mo(3)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "fixed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], MaintenanceOrder.STATUS_IN_PROGRESS)
+        items[0].refresh_from_db()
+        self.assertEqual(items[0].status, SerializedItem.STATUS_AVAILABLE)
+        maintenance_order.refresh_from_db()
+        self.assertEqual(maintenance_order.status, MaintenanceOrder.STATUS_IN_PROGRESS)
+
+    def test_mark_a_line_item_as_not_fixable(self):
+        # TC-02/AC-2: item -> "written_off".
+        maintenance_order, items = self._create_mo(2)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "not_fixable"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items[0].refresh_from_db()
+        self.assertEqual(items[0].status, SerializedItem.STATUS_WRITTEN_OFF)
+
+    def test_mo_completes_when_all_line_items_resolved(self):
+        # TC-03/AC-3: resolving the final remaining item flips the MO to
+        # "completed".
+        maintenance_order, items = self._create_mo(3)
+        for item in items[:2]:
+            self.client.post(
+                self._resolve_url(maintenance_order),
+                {"item_id": item.id, "resolution": "fixed"},
+                format="json",
+            )
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[2].id, "resolution": "fixed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], MaintenanceOrder.STATUS_COMPLETED)
+        maintenance_order.refresh_from_db()
+        self.assertEqual(maintenance_order.status, MaintenanceOrder.STATUS_COMPLETED)
+
+    def test_mixed_resolution_outcomes_completes_the_mo(self):
+        # TC-04/AC-3: one item fixed, one not_fixable - both outcomes count
+        # as "resolved" so the MO still reaches "completed".
+        maintenance_order, items = self._create_mo(2)
+        self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "fixed"},
+            format="json",
+        )
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[1].id, "resolution": "not_fixable"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], MaintenanceOrder.STATUS_COMPLETED)
+        items[0].refresh_from_db()
+        items[1].refresh_from_db()
+        self.assertEqual(items[0].status, SerializedItem.STATUS_AVAILABLE)
+        self.assertEqual(items[1].status, SerializedItem.STATUS_WRITTEN_OFF)
+
+    def test_resolve_rejects_an_item_not_on_this_maintenance_order(self):
+        maintenance_order, _ = self._create_mo(1)
+        other_item = SerializedItemFactory(status=SerializedItem.STATUS_AVAILABLE)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": other_item.id, "resolution": "fixed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_id"],
+            [
+                f"{other_item.serial_number} is not a line item on"
+                f" {maintenance_order.reference}"
+            ],
+        )
+
+    def test_resolve_rejects_an_unknown_item_id(self):
+        maintenance_order, _ = self._create_mo(1)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": 999999, "resolution": "fixed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["item_id"], ["Item not found."])
+
+    def test_resolve_rejects_an_invalid_resolution_value(self):
+        maintenance_order, items = self._create_mo(1)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "bogus"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("resolution", response.data)
+
+    def test_resolve_requires_authentication(self):
+        maintenance_order, items = self._create_mo(1)
+        self.client.logout()
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "fixed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
