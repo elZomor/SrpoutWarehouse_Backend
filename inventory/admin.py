@@ -4,6 +4,7 @@ from inventory.models import (
     Box,
     Category,
     DamageReport,
+    MaintenanceOrder,
     ProductType,
     PurchaseOrder,
     PurchaseOrderLineItem,
@@ -30,7 +31,14 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(SerializedItem)
 class SerializedItemAdmin(admin.ModelAdmin):
-    list_display = ("serial_number", "product_type", "status", "serial", "box")
+    list_display = (
+        "serial_number",
+        "product_type",
+        "status",
+        "serial",
+        "box",
+        "maintenance_order",
+    )
     list_filter = ("status", "product_type")
     search_fields = SerializedItem.SEARCH_FIELDS
 
@@ -72,6 +80,12 @@ class WorkOrderAdmin(admin.ModelAdmin):
 class DamageReportAdmin(admin.ModelAdmin):
     list_display = ("id", "serialized_item", "user", "created_at")
     search_fields = ("serialized_item__serial_number",)
+
+
+@admin.register(MaintenanceOrder)
+class MaintenanceOrderAdmin(admin.ModelAdmin):
+    list_display = ("reference", "status", "created_at")
+    list_filter = ("status",)
 
 
 @admin.register(Transaction)

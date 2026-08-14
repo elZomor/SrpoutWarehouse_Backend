@@ -11,6 +11,7 @@ from inventory.models import ProductType, SerializedItem
 from inventory.models.product_type import (
     AVAILABLE_COUNT_ANNOTATION,
     DAMAGED_COUNT_ANNOTATION,
+    IN_MAINTENANCE_COUNT_ANNOTATION,
     MISSING_COUNT_ANNOTATION,
     OUT_COUNT_ANNOTATION,
     TOTAL_COUNT_ANNOTATION,
@@ -91,6 +92,14 @@ class ProductTypeViewSet(
                         "serialized_items",
                         filter=Q(
                             serialized_items__status=SerializedItem.STATUS_AVAILABLE
+                        ),
+                    ),
+                    IN_MAINTENANCE_COUNT_ANNOTATION: Count(
+                        "serialized_items",
+                        filter=Q(
+                            serialized_items__status=(
+                                SerializedItem.STATUS_IN_MAINTENANCE
+                            )
                         ),
                     ),
                 }

@@ -445,6 +445,22 @@ class ProductTypeStockSummaryTests(APITestCase):
         self.assertEqual(row["total_registered"], 1)
         self.assertEqual(row["available"], 0)
 
+    def test_in_maintenance_items_are_counted_but_not_available(self):
+        # WRH-46: an item pulled onto a Maintenance Order still shows in
+        # total_registered but has its own bucket - not silently dropped
+        # from the breakdown, and not counted as available.
+        product_type = ProductTypeFactory(category=self.category)
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_IN_MAINTENANCE
+        )
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        row = self._summary_for(response, product_type.id)
+        self.assertEqual(row["total_registered"], 1)
+        self.assertEqual(row["in_maintenance"], 1)
+        self.assertEqual(row["available"], 0)
+
     def test_product_type_with_zero_items_shows_all_zeros(self):
         # AC-5/TC-05
         product_type = ProductTypeFactory(category=self.category)
@@ -457,6 +473,7 @@ class ProductTypeStockSummaryTests(APITestCase):
         self.assertEqual(row["damaged"], 0)
         self.assertEqual(row["missing"], 0)
         self.assertEqual(row["available"], 0)
+        self.assertEqual(row["in_maintenance"], 0)
 
     def test_no_product_types_shows_empty_list(self):
         # AC-6/TC-06

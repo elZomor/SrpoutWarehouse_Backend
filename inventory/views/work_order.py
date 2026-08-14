@@ -77,6 +77,13 @@ NOT_STILL_OUT_STATUSES = (
     # close()'s bulk sweep would silently clobber a written-off item back
     # to STATUS_MISSING, destroying the write-off record.
     SerializedItem.STATUS_WRITTEN_OFF,
+    # WRH-46: same reasoning as STATUS_WRITTEN_OFF above - an item pulled
+    # into a Maintenance Order mid-WO is a resolved-for-this-WO outcome,
+    # not "still pending" on it; without this, close()'s bulk sweep would
+    # silently clobber it back to STATUS_MISSING, destroying the
+    # maintenance claim (SerializedItem.maintenance_order is PROTECT and
+    # never cleared, but its status would go stale and misleading).
+    SerializedItem.STATUS_IN_MAINTENANCE,
 )
 
 

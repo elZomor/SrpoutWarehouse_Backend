@@ -12,6 +12,14 @@ OUT_COUNT_ANNOTATION = "out_count"
 DAMAGED_COUNT_ANNOTATION = "damaged_count"
 MISSING_COUNT_ANNOTATION = "missing_count"
 AVAILABLE_COUNT_ANNOTATION = "available_count"
+# WRH-46: added once MaintenanceOrderSerializer.create() became the first
+# code path to ever actually set STATUS_IN_MAINTENANCE on a real row -
+# before that, the status existed but nothing reachable set it, so its
+# absence from this breakdown was a dormant gap, not a live one. Without
+# this bucket, an in-maintenance item stays counted in
+# TOTAL_COUNT_ANNOTATION but vanishes from every per-status count, so the
+# breakdown no longer sums to the total.
+IN_MAINTENANCE_COUNT_ANNOTATION = "in_maintenance_count"
 
 
 class ProductType(models.Model):
