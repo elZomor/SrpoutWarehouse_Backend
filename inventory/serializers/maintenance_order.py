@@ -121,3 +121,19 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
                 status=SerializedItem.STATUS_IN_MAINTENANCE,
             )
         return maintenance_order
+
+
+class MaintenanceOrderResolveSerializer(serializers.Serializer):
+    # Input-only (AC-1/AC-2): which line item is being resolved, and to
+    # which outcome - matches WorkOrderReturnScanSerializer's identical
+    # plain-Serializer input shape for a detail action's request body.
+    RESOLUTION_FIXED = "fixed"
+    RESOLUTION_NOT_FIXABLE = "not_fixable"
+    RESOLUTION_CHOICES = [RESOLUTION_FIXED, RESOLUTION_NOT_FIXABLE]
+
+    item_id = serializers.PrimaryKeyRelatedField(
+        queryset=SerializedItem.objects.all(),
+        source="item",
+        error_messages={"does_not_exist": "Item not found."},
+    )
+    resolution = serializers.ChoiceField(choices=RESOLUTION_CHOICES)
