@@ -1,5 +1,12 @@
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q, prefetch_related_objects
+from django.db.models import (
+    Count,
+    Exists,
+    OuterRef,
+    Prefetch,
+    Q,
+    prefetch_related_objects,
+)
 from django.http import HttpResponse
 from django.template.loader import render_to_string
 from rest_framework import mixins, viewsets
@@ -177,9 +184,21 @@ class WorkOrderViewSet(
             # WRH-40: a manually "closed" WO is equally done - excluded the
             # same way. "partially_returned" still needs attention, so it
             # stays.
+            # WRH-69: a terminal Primary is kept visible anyway if it still
+            # has a non-terminal Supplementary nested under it - otherwise
+            # close()/return_item() on the Primary alone silently drops a
+            # still-active Supplementary off this list entirely, since
+            # supplementaries are only ever reachable by nesting under
+            # their Primary's row here.
+            non_terminal_supplementary = WorkOrder.objects.filter(
+                parent_work_order_id=OuterRef("pk")
+            ).exclude(status__in=_TERMINAL_STATUSES)
             return (
                 WorkOrder.objects.filter(parent_work_order__isnull=True)
-                .exclude(status__in=_TERMINAL_STATUSES)
+                .annotate(has_active_supplementary=Exists(non_terminal_supplementary))
+                .filter(
+                    Q(has_active_supplementary=True) | ~Q(status__in=_TERMINAL_STATUSES)
+                )
                 .order_by("-expected_date_out", "-id")
                 .prefetch_related(
                     Prefetch("line_items", queryset=_active_line_items_queryset()),
