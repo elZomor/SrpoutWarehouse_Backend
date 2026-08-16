@@ -1408,6 +1408,49 @@ class WorkOrderActiveListTests(APITestCase):
         ids = [row["id"] for row in response.data]
         self.assertEqual(ids, [still_active.id])
 
+    def test_active_list_keeps_terminal_primary_visible_when_supplementary_active(
+        self,
+    ):
+        # WRH-69: a Primary reaching status=closed/returned would otherwise
+        # drop it - and any still-active Supplementary nested under it,
+        # since supplementaries only ever surface via that nesting - off the
+        # Active list entirely. The terminal Primary must stay visible
+        # purely to keep the still-active Supplementary reachable.
+        primary = WorkOrderFactory(created_by=self.user, status=WorkOrder.STATUS_CLOSED)
+        still_active_supplementary = WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            status=WorkOrder.STATUS_PARTIALLY_RETURNED,
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        ids = [row["id"] for row in response.data]
+        self.assertEqual(ids, [primary.id])
+        self.assertEqual(response.data[0]["status"], WorkOrder.STATUS_CLOSED)
+        supplementary_ids = [s["id"] for s in response.data[0]["supplementaries"]]
+        self.assertEqual(supplementary_ids, [still_active_supplementary.id])
+
+    def test_active_list_still_excludes_a_terminal_primary_with_no_active_supplementary(
+        self,
+    ):
+        # Confirms WRH-69's fix doesn't regress WRH-38/WRH-40's exclusion
+        # when there's no still-active Supplementary to keep it visible for.
+        primary = WorkOrderFactory(created_by=self.user, status=WorkOrder.STATUS_CLOSED)
+        WorkOrderFactory(
+            created_by=self.user,
+            parent_work_order=primary,
+            status=WorkOrder.STATUS_RETURNED,
+        )
+        still_active = WorkOrderFactory(
+            created_by=self.user, status=WorkOrder.STATUS_PARTIALLY_RETURNED
+        )
+
+        response = self.client.get(reverse("workorder-active"))
+
+        ids = [row["id"] for row in response.data]
+        self.assertEqual(ids, [still_active.id])
+
     def test_active_list_excludes_supplementaries_from_the_top_level(self):
         primary = WorkOrderFactory(created_by=self.user)
         WorkOrderFactory(created_by=self.user, parent_work_order=primary)
