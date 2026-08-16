@@ -16,10 +16,8 @@ class MaintenanceOrderViewSet(
     mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
 ):
     # WRH-46 (US-022a) scopes create+list; WRH-58 (US-022c) adds the
-    # resolve() action below. Re-resolving an already-resolved line item and
-    # other business-rule guards remain WRH-47/US-022b's separate scope, per
-    # this story's own split notes - matching BoxViewSet's "only the mixins/
-    # behavior the ticket scopes" convention.
+    # resolve() action below; WRH-47 (US-022b) adds the eligibility/
+    # terminal-state business-rule guards on top of both.
     permission_classes = [IsAuthenticated]
     queryset = MaintenanceOrder.objects.prefetch_related("items")
     serializer_class = MaintenanceOrderSerializer
@@ -29,10 +27,8 @@ class MaintenanceOrderViewSet(
         # AC-1/AC-2: a line item's outcome flips it to "available" (fixed)
         # or "written_off" (not_fixable). AC-3: the MO's own status is
         # derived from all its items - "in_progress" once some but not all
-        # are resolved, "completed" once every item is. Whether the target
-        # item is currently eligible to be resolved at all (i.e. not already
-        # resolved) is WRH-47/AC-3's guard, deliberately not enforced here -
-        # this action only implements the happy-path transition itself.
+        # are resolved, "completed" once every item is. WRH-47/AC-3 below
+        # blocks re-resolving an item that already went through this once.
         maintenance_order = self.get_object()
         serializer = MaintenanceOrderResolveSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -61,6 +57,14 @@ class MaintenanceOrderViewSet(
                             f" {maintenance_order.reference}"
                         ]
                     }
+                )
+            # WRH-47/AC-3: a resolution is final - resolve() flips status to
+            # available/written_off and never back, so status no longer
+            # being in_maintenance means this line item was already
+            # resolved by an earlier call.
+            if item.status != SerializedItem.STATUS_IN_MAINTENANCE:
+                raise ValidationError(
+                    {"item_id": [f"{item.serial_number} has already been resolved"]}
                 )
 
             item.status = (
