@@ -8,13 +8,17 @@ from inventory.serializers import BoxSerializer
 
 
 class BoxViewSet(
-    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
 ):
     # WRH-26 (US-007a) scopes register+list+QR; field/business-rule
-    # validation (WRH-27) tightens BoxSerializer.item_ids further.
-    # retrieve/update/destroy stay unregistered - a box's contents are fixed
-    # after creation (PRD v0.5 §2.2 Out of Scope: "Box contents
-    # modification"), matching this repo's "only the mixins the ticket
+    # validation (WRH-27) tightens BoxSerializer.item_ids further; WRH-71
+    # adds retrieve (box detail, i.e. its packed items) for the box-detail
+    # UI - box contents themselves are still fixed after creation (PRD v0.5
+    # §2.2 Out of Scope: "Box contents modification"), so update/destroy
+    # stay unregistered, matching this repo's "only the mixins the ticket
     # scopes" convention.
     permission_classes = [IsAuthenticated]
     queryset = Box.objects.select_related("product_type").prefetch_related("items")
