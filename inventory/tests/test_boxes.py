@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from inventory.models import Box, ProductType
+from inventory.models import Box, ProductType, SerializedItem
 from inventory.tests.factories import (
     BoxFactory,
     ProductTypeFactory,
@@ -204,27 +204,76 @@ class BoxCreationTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_retrieve_update_destroy_routes_are_not_registered(self):
-        # No retrieve/update/destroy mixin is mixed in (box contents are
-        # fixed after creation) and qr-code is the only detail route, so
-        # DRF never registers a base "{pk}/" pattern at all - unlike a
-        # viewset with at least one detail mixin (e.g. WorkOrder's retrieve),
-        # this 404s at the URL-resolution level rather than 405ing on a
-        # registered-but-unmapped method.
+    def test_update_destroy_routes_are_not_registered(self):
+        # WRH-71 adds retrieve (box detail) but update/destroy still aren't
+        # mixed in - box contents are fixed after creation - so those two
+        # 405 on the now-registered "{pk}/" pattern rather than 404ing at
+        # URL-resolution level (retrieve's mixin means the base pattern
+        # exists now, unlike before WRH-71).
         box = BoxFactory(product_type=self.product_type)
 
         detail_url = f"/api/boxes/{box.id}/"
 
         self.assertEqual(
-            self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND
-        )
-        self.assertEqual(
             self.client.put(detail_url, {}, format="json").status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
         self.assertEqual(
-            self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND
+            self.client.delete(detail_url).status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
         )
+
+    def test_retrieve_returns_box_detail_with_its_items(self):
+        # AC-1/AC-2/TC-01: clicking a box shows the items packed inside it.
+        items = [
+            SerializedItemFactory(product_type=self.product_type) for _ in range(3)
+        ]
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(pk__in=[i.pk for i in items]).update(box=box)
+
+        response = self.client.get(f"/api/boxes/{box.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["code"], box.code)
+        self.assertEqual(
+            {item["id"] for item in response.data["items"]},
+            {item.id for item in items},
+        )
+
+    def test_retrieve_empty_box_returns_empty_items_list(self):
+        # AC-3/TC-02: an empty box isn't an error, just an empty list.
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.client.get(f"/api/boxes/{box.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["items"], [])
+
+    def test_retrieve_only_shows_items_currently_assigned_to_the_box(self):
+        # AC-5: an item that was in this box but has since moved to another
+        # box (e.g. reassigned via a different flow) shouldn't still show.
+        box = BoxFactory(product_type=self.product_type)
+        other_box = BoxFactory(product_type=self.product_type)
+        item = SerializedItemFactory(product_type=self.product_type, box=other_box)
+
+        response = self.client.get(f"/api/boxes/{box.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(item.id, [i["id"] for i in response.data["items"]])
+
+    def test_retrieve_404s_for_unknown_box(self):
+        # TC-05: a non-existent/deleted box 404s, not a crash.
+        response = self.client.get("/api/boxes/999999/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_retrieve_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        box = BoxFactory(product_type=self.product_type)
+
+        response = self.client.get(f"/api/boxes/{box.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class BoxQrCodeTests(APITestCase):
