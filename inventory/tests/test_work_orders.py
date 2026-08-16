@@ -2079,6 +2079,11 @@ class WorkOrderTransferTests(APITestCase):
         self.destination_work_order = WorkOrderFactory(
             status=WorkOrder.STATUS_IN_PROGRESS
         )
+        self.destination_line_item = WorkOrderLineItemFactory(
+            work_order=self.destination_work_order,
+            product_type=self.product_type,
+            quantity=2,
+        )
 
     def _out_item(self):
         return SerializedItemFactory(
@@ -2087,11 +2092,21 @@ class WorkOrderTransferTests(APITestCase):
             status=SerializedItem.STATUS_OUT,
         )
 
-    def transfer(self, serial_number, destination_work_order=None):
+    def transfer(
+        self,
+        serial_number,
+        destination_work_order=None,
+        destination_line_item=None,
+    ):
         destination = destination_work_order or self.destination_work_order
+        destination_line = destination_line_item or self.destination_line_item
         return self.client.post(
             reverse("workorder-transfer", args=[self.source_work_order.id]),
-            {"serial_number": serial_number, "destination_work_order": destination.id},
+            {
+                "serial_number": serial_number,
+                "destination_work_order": destination.id,
+                "destination_line_item": destination_line.id,
+            },
             format="json",
         )
 
@@ -2107,6 +2122,9 @@ class WorkOrderTransferTests(APITestCase):
         self.assertEqual(
             item.last_work_order_reference, f"WO-{self.destination_work_order.id}"
         )
+        # WRH-68: work_order_line_item now actually follows the item to the
+        # destination, not just the display-only reference string.
+        self.assertEqual(item.work_order_line_item_id, self.destination_line_item.id)
 
     def test_transfer_to_a_supplementary_wo(self):
         # AC-2/TC-02: a Supplementary WO is a valid destination too.
@@ -2115,9 +2133,16 @@ class WorkOrderTransferTests(APITestCase):
             parent_work_order=self.destination_work_order,
             supplementary_sequence=1,
         )
+        supplementary_line_item = WorkOrderLineItemFactory(
+            work_order=supplementary,
+            product_type=self.product_type,
+            quantity=1,
+        )
 
         response = self.transfer(
-            item.serial_number, destination_work_order=supplementary
+            item.serial_number,
+            destination_work_order=supplementary,
+            destination_line_item=supplementary_line_item,
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -2126,6 +2151,7 @@ class WorkOrderTransferTests(APITestCase):
             item.last_work_order_reference,
             f"WO-{self.destination_work_order.id}-S1",
         )
+        self.assertEqual(item.work_order_line_item_id, supplementary_line_item.id)
 
     def test_transfer_from_a_partially_returned_wo(self):
         # AC-1/TC-03: source WO status "partially_returned" is still eligible.
@@ -2239,6 +2265,87 @@ class WorkOrderTransferTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_transfer_rejects_a_destination_line_item_on_a_different_wo(self):
+        # WRH-68: destination_line_item must actually belong to
+        # destination_work_order, not just exist.
+        other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        other_line_item = WorkOrderLineItemFactory(
+            work_order=other_work_order, product_type=self.product_type
+        )
+        item = self._out_item()
+
+        response = self.transfer(
+            item.serial_number, destination_line_item=other_line_item
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_rejects_a_destination_line_item_with_mismatched_product_type(
+        self,
+    ):
+        # WRH-68: destination_line_item's product type must match the
+        # transferred item's - the line item can't silently reassign a
+        # thing to a mismatched product-type slot.
+        other_product_type = ProductTypeFactory()
+        mismatched_line_item = WorkOrderLineItemFactory(
+            work_order=self.destination_work_order, product_type=other_product_type
+        )
+        item = self._out_item()
+
+        response = self.transfer(
+            item.serial_number, destination_line_item=mismatched_line_item
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_transfer_rejects_once_destination_line_item_quantity_is_reached(self):
+        # WRH-68/AC parity with scan(): a destination line item already at
+        # its requested quantity can't accept another transferred item.
+        self.destination_line_item.quantity = 1
+        self.destination_line_item.save(update_fields=["quantity"])
+        already_claimed = SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=self.destination_line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+        item = self._out_item()
+
+        response = self.transfer(item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        already_claimed.refresh_from_db()
+        self.assertEqual(
+            already_claimed.work_order_line_item_id, self.destination_line_item.id
+        )
+
+    def test_transfer_reassigns_work_order_line_item_for_destination_return(self):
+        # WRH-68 bug repro: before the fix, a transferred item's
+        # work_order_line_item FK stayed pointed at the source WO, so
+        # return_item() rejected the true (destination) WO and incorrectly
+        # accepted the stale (source) WO. Both must now behave correctly.
+        self.destination_work_order.status = WorkOrder.STATUS_FULFILLED
+        self.destination_work_order.save(update_fields=["status"])
+        item = self._out_item()
+
+        transfer_response = self.transfer(item.serial_number)
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+
+        source_return = self.client.post(
+            reverse("workorder-return-item", args=[self.source_work_order.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+        self.assertEqual(source_return.status_code, status.HTTP_400_BAD_REQUEST)
+
+        destination_return = self.client.post(
+            reverse("workorder-return-item", args=[self.destination_work_order.id]),
+            {"serial_number": item.serial_number},
+            format="json",
+        )
+        self.assertEqual(destination_return.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+
 
 class WorkOrderCloseTests(APITestCase):
     def setUp(self):
@@ -2320,15 +2427,23 @@ class WorkOrderCloseTests(APITestCase):
     def test_close_excludes_an_item_transferred_away_to_another_wo(self):
         # An item transfer()'d off this WO to another one is legitimately
         # out on the *destination* WO, not lost - close() must not sweep it
-        # into Missing Items just because transfer() never reassigns
-        # work_order_line_item.
+        # into Missing Items. WRH-68: transfer() now reassigns
+        # work_order_line_item to the destination, so still_out_candidates'
+        # own work_order_line_item__work_order_id filter excludes it
+        # naturally; the Transaction-based exclusion below is now a
+        # redundant belt-and-suspenders check rather than the only thing
+        # catching this case.
         item = self._out_item()
         destination = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        destination_line_item = WorkOrderLineItemFactory(
+            work_order=destination, product_type=self.product_type
+        )
         transfer_response = self.client.post(
             reverse("workorder-transfer", args=[self.work_order.id]),
             {
                 "serial_number": item.serial_number,
                 "destination_work_order": destination.id,
+                "destination_line_item": destination_line_item.id,
             },
             format="json",
         )
@@ -2361,6 +2476,9 @@ class WorkOrderCloseTests(APITestCase):
         # (the fresh issue), just never both on the same row.
         old_source = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
         old_destination = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        old_destination_line_item = WorkOrderLineItemFactory(
+            work_order=old_destination, product_type=self.product_type
+        )
         item = SerializedItemFactory(
             product_type=self.product_type,
             work_order_line_item=WorkOrderLineItemFactory(
@@ -2373,6 +2491,7 @@ class WorkOrderCloseTests(APITestCase):
             {
                 "serial_number": item.serial_number,
                 "destination_work_order": old_destination.id,
+                "destination_line_item": old_destination_line_item.id,
             },
             format="json",
         )
@@ -2422,17 +2541,18 @@ class WorkOrderCloseTests(APITestCase):
             {
                 "serial_number": item.serial_number,
                 "destination_work_order": self.work_order.id,
+                "destination_line_item": self.line_item.id,
             },
             format="json",
         )
         self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
 
-        # return_item()'s own pre-existing "trusts the stale FK" limitation
-        # (see its comment) lets this succeed on `origin` even though the
-        # item is procedurally on self.work_order now - the FK was never
-        # reassigned by transfer().
+        # WRH-68: transfer() now reassigns work_order_line_item to the
+        # destination, so the item is returned on the WO it's really on -
+        # self.work_order, not origin (returning on origin would now
+        # correctly be rejected instead of silently succeeding).
         return_response = self.client.post(
-            reverse("workorder-return-item", args=[origin.id]),
+            reverse("workorder-return-item", args=[self.work_order.id]),
             {"serial_number": item.serial_number},
             format="json",
         )
@@ -2507,13 +2627,16 @@ class WorkOrderCloseTests(APITestCase):
             {"serial_number": item.serial_number},
             format="json",
         )
+        other_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        other_line_item = WorkOrderLineItemFactory(
+            work_order=other_work_order, product_type=self.product_type
+        )
         transfer_response = self.client.post(
             reverse("workorder-transfer", args=[self.work_order.id]),
             {
                 "serial_number": item.serial_number,
-                "destination_work_order": WorkOrderFactory(
-                    status=WorkOrder.STATUS_FULFILLED
-                ).id,
+                "destination_work_order": other_work_order.id,
+                "destination_line_item": other_line_item.id,
             },
             format="json",
         )
