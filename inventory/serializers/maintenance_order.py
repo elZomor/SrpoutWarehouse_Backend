@@ -34,7 +34,7 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
         allow_empty=False,
         error_messages={
             "does_not_exist": "Select an item that exists.",
-            "empty": "Select at least one item.",
+            "empty": "Select at least one damaged item.",
         },
     )
     items = MaintenanceOrderItemSerializer(many=True, read_only=True)
@@ -46,9 +46,8 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _validate_item(item):
-        # Not the "only damaged items eligible" business rule (WRH-47's
-        # scope) - this guards against silently clobbering a claim this
-        # item already has on another MaintenanceOrder, the same structural
+        # WRH-47/AC-4: guards against silently clobbering a claim this item
+        # already has on another MaintenanceOrder, the same structural
         # corruption BoxSerializer._validate_item's "already in another box"
         # check guards against for its own claim FK. Deliberately does NOT
         # check item.box_id: unlike work_order_line_item (below) and this
@@ -58,7 +57,15 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
         # "boxed item marked damaged mid-box" handling), so box_id being set
         # must not block it. An earlier version of this check treated box_id
         # as a live claim and wrongly rejected every ever-boxed item.
-        if item.maintenance_order_id is not None:
+        # maintenance_order_id, like work_order_line_item_id, is never
+        # cleared by resolve() - so the claim only stays live while the MO
+        # itself is still open/in_progress; an item resolved off a
+        # *completed* MO and later damaged again must not be rejected just
+        # because it has MO history.
+        if item.maintenance_order_id is not None and item.maintenance_order.status in (
+            MaintenanceOrder.STATUS_OPEN,
+            MaintenanceOrder.STATUS_IN_PROGRESS,
+        ):
             raise serializers.ValidationError(
                 {
                     "item_ids": [
@@ -82,6 +89,20 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
                 {
                     "item_ids": [
                         f"{item.serial_number} is currently claimed on a work order"
+                    ]
+                }
+            )
+        # WRH-47/AC-1: eligibility is restricted to damaged items - the two
+        # checks above raise more specific reasons first for the statuses
+        # they cover (reserved/out); everything else that isn't "damaged"
+        # (available, missing, written_off, or still in_maintenance without
+        # a live MO claim) falls through to this generic rejection.
+        if item.status != SerializedItem.STATUS_DAMAGED:
+            raise serializers.ValidationError(
+                {
+                    "item_ids": [
+                        f"{item.serial_number} must be damaged to be added to a"
+                        " maintenance order"
                     ]
                 }
             )

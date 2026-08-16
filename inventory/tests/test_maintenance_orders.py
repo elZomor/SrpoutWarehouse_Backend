@@ -108,6 +108,59 @@ class MaintenanceOrderCreationTests(APITestCase):
         second_item.refresh_from_db()
         self.assertIsNone(second_item.maintenance_order_id)
 
+    def test_create_mo_accepts_an_item_resolved_off_a_completed_maintenance_order(
+        self,
+    ):
+        # AC-4 only blocks a claim on an OPEN/in_progress MO -
+        # maintenance_order_id, like work_order_line_item_id, is never
+        # cleared by resolve(), so an item resolved off a *completed* MO
+        # and later damaged again must be eligible for a new one.
+        item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        first_response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        first_mo = MaintenanceOrder.objects.get(pk=first_response.data["id"])
+        self.client.post(
+            f"/api/maintenance-orders/{first_mo.id}/resolve/",
+            {"item_id": item.id, "resolution": "fixed"},
+            format="json",
+        )
+        item.status = SerializedItem.STATUS_DAMAGED
+        item.save(update_fields=["status"])
+
+        second_response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.data["reference"], "MO-0002")
+
+    def test_create_mo_rejects_a_non_damaged_item(self):
+        # AC-1: only damaged items are eligible.
+        item = SerializedItemFactory(status=SerializedItem.STATUS_AVAILABLE)
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["item_ids"],
+            [
+                f"{item.serial_number} must be damaged to be added to a"
+                " maintenance order"
+            ],
+        )
+        item.refresh_from_db()
+        self.assertIsNone(item.maintenance_order_id)
+
     def test_create_mo_accepts_a_damaged_item_that_is_still_boxed(self):
         # Box membership is a permanent, orthogonal physical tag (nothing
         # ever clears SerializedItem.box), not a competing claim - a boxed
@@ -187,7 +240,9 @@ class MaintenanceOrderCreationTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["item_ids"], ["Select at least one item."])
+        self.assertEqual(
+            response.data["item_ids"], ["Select at least one damaged item."]
+        )
 
     def test_create_mo_rechecks_claims_after_lock_is_acquired(self):
         # The item_ids field/validate() check above only catches a claim
@@ -362,6 +417,31 @@ class MaintenanceOrderResolveTests(APITestCase):
                 f" {maintenance_order.reference}"
             ],
         )
+
+    def test_resolve_rejects_an_already_resolved_line_item(self):
+        # AC-3: a resolution is final - no further action once fixed or
+        # not_fixable.
+        maintenance_order, items = self._create_mo(1)
+        first_response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "fixed"},
+            format="json",
+        )
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+
+        second_response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "not_fixable"},
+            format="json",
+        )
+
+        self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            second_response.data["item_id"],
+            [f"{items[0].serial_number} has already been resolved"],
+        )
+        items[0].refresh_from_db()
+        self.assertEqual(items[0].status, SerializedItem.STATUS_AVAILABLE)
 
     def test_resolve_rejects_an_unknown_item_id(self):
         maintenance_order, _ = self._create_mo(1)
