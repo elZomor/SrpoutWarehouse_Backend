@@ -1055,6 +1055,30 @@ class WorkOrderViewSet(
             )
 
         with transaction.atomic():
+            # WRH-68: lock the destination WorkOrder row *before* the item
+            # row - every other lock-acquiring action in this file
+            # (scan()/return_item()/return_box()/close()) locks its WO row
+            # first, then the item row; locking the item first here would
+            # invert that ordering and open a deadlock cycle against e.g. a
+            # concurrent scan() on the same destination WO (which locks the
+            # WO, then blocks on the item) racing this transfer() (which
+            # would lock the item, then block on the WO). Also re-checked
+            # for terminal status under the lock, matching scan()'s "guard
+            # re-checked after lock" pattern - the pre-lock check above only
+            # proves it wasn't terminal before this transaction started.
+            destination_work_order = WorkOrder.objects.select_for_update().get(
+                pk=destination_work_order.pk
+            )
+            if destination_work_order.status in _TERMINAL_STATUSES:
+                raise ValidationError(
+                    {
+                        "destination_work_order": [
+                            "Destination work order is closed and cannot"
+                            " receive transfers."
+                        ]
+                    }
+                )
+
             # WRH-28: no select_related("work_order_line_item") here - that
             # FK is nullable, so pairing it with select_for_update() produces
             # a LEFT OUTER JOIN Postgres refuses to lock, invisible on this
@@ -1090,30 +1114,11 @@ class WorkOrderViewSet(
                     }
                 )
 
-            # WRH-68: lock the destination WorkOrder row - protects
-            # destination_line_item's quantity cap below the same way
-            # scan()'s identical WO-level lock does, since a concurrent
-            # scan()/transfer() into the same line item must serialize
-            # against this one. Also re-checked for terminal status under
-            # the lock, matching scan()'s "guard re-checked after lock"
-            # pattern - the pre-lock check above only proves it wasn't
-            # terminal before this transaction started.
-            destination_work_order = WorkOrder.objects.select_for_update().get(
-                pk=destination_work_order.pk
+            # No select_related("product_type") - only product_type_id is
+            # read below, never the related row itself.
+            destination_line_item = WorkOrderLineItem.objects.get(
+                pk=destination_line_item.pk
             )
-            if destination_work_order.status in _TERMINAL_STATUSES:
-                raise ValidationError(
-                    {
-                        "destination_work_order": [
-                            "Destination work order is closed and cannot"
-                            " receive transfers."
-                        ]
-                    }
-                )
-
-            destination_line_item = WorkOrderLineItem.objects.select_related(
-                "product_type"
-            ).get(pk=destination_line_item.pk)
             if destination_line_item.work_order_id != destination_work_order.id:
                 raise ValidationError(
                     {
