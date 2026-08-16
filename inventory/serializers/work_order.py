@@ -253,6 +253,13 @@ class WorkOrderTransferSerializer(serializers.Serializer):
     # parent_work_order's "no queryset restriction needed beyond existing"
     # reasoning: unlike parent_work_order, a transfer destination has no
     # "must be a Primary" rule to enforce, so the queryset is unrestricted.
+    #
+    # WRH-68: destination_line_item is required so the FK the item actually
+    # carries (work_order_line_item) can be reassigned to the destination -
+    # mirrors WorkOrderScanSerializer's identical explicit-selection shape
+    # rather than scan_box()'s auto-match-by-product-type shape, since a
+    # destination WO can have more than one line item of the transferred
+    # item's product type and there's no unambiguous way to pick one.
     serial_number = serializers.CharField(
         error_messages={
             "blank": "Serial number is required.",
@@ -264,6 +271,15 @@ class WorkOrderTransferSerializer(serializers.Serializer):
         error_messages={
             "required": "Destination work order is required.",
             "does_not_exist": "Select a work order that exists.",
+        },
+    )
+    destination_line_item = serializers.PrimaryKeyRelatedField(
+        queryset=WorkOrderLineItem.objects.filter(product_type__archived=False),
+        error_messages={
+            "required": "Destination line item is required.",
+            "does_not_exist": (
+                "Select a line item whose product type exists and is not archived."
+            ),
         },
     )
 

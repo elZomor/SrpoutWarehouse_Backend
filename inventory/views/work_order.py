@@ -663,11 +663,17 @@ class WorkOrderViewSet(
                     {"status": ["Work order is not eligible for return."]}
                 )
 
+            # WRH-28/WRH-68: no select_related("work_order_line_item") here -
+            # that FK is nullable, so pairing it with select_for_update()
+            # produces a LEFT OUTER JOIN Postgres refuses to lock (crashes
+            # on every call, not just a stale-FK one) - invisible on this
+            # repo's SQLite-backed CI. Matches return_box()/transfer()'s
+            # identical fix; this call site was flagged but left unfixed by
+            # WRH-28 itself. The lazy follow-up query below only fires on
+            # the rejection branch.
             try:
-                item = (
-                    SerializedItem.objects.select_for_update()
-                    .select_related("work_order_line_item")
-                    .get(serial_number=serial_number)
+                item = SerializedItem.objects.select_for_update().get(
+                    serial_number=serial_number
                 )
             except SerializedItem.DoesNotExist:
                 raise ValidationError({"serial_number": ["Serial not found"]})
@@ -1011,13 +1017,13 @@ class WorkOrderViewSet(
     def transfer(self, request, pk=None):
         # WRH-36/AC-1/AC-2: reassign a currently-out item from this (source)
         # work order to another (destination) - any WO, Primary or
-        # Supplementary. Unlike scan()/return_item(), no destination line
-        # item is chosen (the ticket's ACs/Test Cases never ask for one) -
-        # this only updates the item's last_work_order_reference and logs
-        # the move; it deliberately leaves work_order_line_item untouched,
-        # matching return_item()'s own "current claim only, no history"
-        # comment for that FK, since a destination line item to reassign it
-        # to doesn't exist in this flow.
+        # Supplementary.
+        # WRH-68: destination_line_item (required, see the serializer's own
+        # comment) is now reassigned onto item.work_order_line_item, not
+        # just item.last_work_order_reference - leaving the FK stale meant
+        # return_item()'s ownership check (the only thing that reads it)
+        # rejected a correct return on the true (destination) WO and
+        # silently accepted an incorrect one on the stale source WO.
         source_work_order = self.get_object()
         if source_work_order.status not in RETURN_ELIGIBLE_STATUSES:
             raise ValidationError(
@@ -1028,6 +1034,7 @@ class WorkOrderViewSet(
         serializer.is_valid(raise_exception=True)
         serial_number = serializer.validated_data["serial_number"]
         destination_work_order = serializer.validated_data["destination_work_order"]
+        destination_line_item = serializer.validated_data["destination_line_item"]
 
         if destination_work_order.id == source_work_order.id:
             raise ValidationError(
@@ -1083,11 +1090,71 @@ class WorkOrderViewSet(
                     }
                 )
 
+            # WRH-68: lock the destination WorkOrder row - protects
+            # destination_line_item's quantity cap below the same way
+            # scan()'s identical WO-level lock does, since a concurrent
+            # scan()/transfer() into the same line item must serialize
+            # against this one. Also re-checked for terminal status under
+            # the lock, matching scan()'s "guard re-checked after lock"
+            # pattern - the pre-lock check above only proves it wasn't
+            # terminal before this transaction started.
+            destination_work_order = WorkOrder.objects.select_for_update().get(
+                pk=destination_work_order.pk
+            )
+            if destination_work_order.status in _TERMINAL_STATUSES:
+                raise ValidationError(
+                    {
+                        "destination_work_order": [
+                            "Destination work order is closed and cannot"
+                            " receive transfers."
+                        ]
+                    }
+                )
+
+            destination_line_item = WorkOrderLineItem.objects.select_related(
+                "product_type"
+            ).get(pk=destination_line_item.pk)
+            if destination_line_item.work_order_id != destination_work_order.id:
+                raise ValidationError(
+                    {
+                        "destination_line_item": [
+                            "Destination line item does not belong to the"
+                            " destination work order."
+                        ]
+                    }
+                )
+            if destination_line_item.product_type_id != item.product_type_id:
+                raise ValidationError(
+                    {
+                        "destination_line_item": [
+                            "Destination line item's product type does not"
+                            " match the transferred item."
+                        ]
+                    }
+                )
+            # AC-2/AC-4 parity with scan(): reject once the destination line
+            # item's requested quantity is already claimed.
+            claimed_count = SerializedItem.objects.filter(
+                work_order_line_item=destination_line_item
+            ).count()
+            if claimed_count >= destination_line_item.quantity:
+                raise ValidationError(
+                    {
+                        "destination_line_item": [
+                            "This line item has already reached its requested"
+                            " quantity."
+                        ]
+                    }
+                )
+
             source_reference = _work_order_reference(source_work_order)
             destination_reference = _work_order_reference(destination_work_order)
 
+            item.work_order_line_item = destination_line_item
             item.last_work_order_reference = destination_reference
-            item.save(update_fields=["last_work_order_reference"])
+            item.save(
+                update_fields=["work_order_line_item", "last_work_order_reference"]
+            )
 
             # AC-3: two rows, not one - TransactionFilterSet.reference_number
             # is a single-field exact match (see its own comment), so "the
