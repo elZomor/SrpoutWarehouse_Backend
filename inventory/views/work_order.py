@@ -156,22 +156,36 @@ def _returnable_work_order_ids(work_order):
 def _consolidated_still_out_work_order_ids(work_order):
     # WRH-80: the Primary's own consolidated status is finalized from this
     # scope, deliberately narrower than _returnable_work_order_ids() above -
-    # a supplementary that's already reached a _TERMINAL_STATUSES status
-    # (e.g. manually close()'d direct, on its own, with items still out -
-    # close() has no _reject_supplementary_return() guard, since closing a
-    # straggling supplementary independently is legitimate WRH-40 behavior)
-    # is done; its own STATUS_MISSING leftovers are a permanent, resolved
-    # outcome for that WO the same way NOT_STILL_OUT_STATUSES already
-    # treats STATUS_DAMAGED/STATUS_WRITTEN_OFF/STATUS_IN_MAINTENANCE -
-    # counting them against the *Primary* forever would mean a closed
-    # supplementary permanently blocks the Primary from ever reaching
-    # STATUS_RETURNED, even once every one of the Primary's own items is
-    # genuinely back. Matches the "active" list's identical
-    # non_terminal_supplementary exclusion (WRH-69).
+    # only supplementaries currently in RETURN_ELIGIBLE_STATUSES
+    # (fulfilled/partially_returned) actually count. That excludes two
+    # different kinds of supplementary the count must not be sensitive to:
+    #
+    # - A supplementary that's already reached a _TERMINAL_STATUSES status
+    #   (e.g. manually close()'d directly, on its own, with items still out
+    #   - close() has no _reject_supplementary_return() guard, since
+    #   closing a straggling supplementary independently is legitimate
+    #   WRH-40 behavior) is done; its own STATUS_MISSING leftovers are a
+    #   permanent, resolved outcome for that WO the same way
+    #   NOT_STILL_OUT_STATUSES already treats STATUS_DAMAGED/
+    #   STATUS_WRITTEN_OFF/STATUS_IN_MAINTENANCE - counting them against
+    #   the *Primary* forever would mean a closed supplementary permanently
+    #   blocks the Primary from ever reaching STATUS_RETURNED. Matches the
+    #   "active" list's identical non_terminal_supplementary exclusion
+    #   (WRH-69).
+    # - A supplementary still mid-fulfillment (draft/in_progress - WRH-53
+    #   supplementaries are created and fulfilled independently of their
+    #   Primary, so one can still be in_progress while the Primary is
+    #   already fulfilled) can have SerializedItems sitting at
+    #   STATUS_RESERVED, which NOT_STILL_OUT_STATUSES does NOT exclude
+    #   (a reserved item is a real, current claim, not a resolved outcome)
+    #   - without this exclusion those reserved-but-not-yet-issued items
+    #   would count as "still out" against the Primary even though this
+    #   supplementary isn't part of any return flow yet.
     return [work_order.id] + list(
-        WorkOrder.objects.filter(parent_work_order_id=work_order.id)
-        .exclude(status__in=_TERMINAL_STATUSES)
-        .values_list("id", flat=True)
+        WorkOrder.objects.filter(
+            parent_work_order_id=work_order.id,
+            status__in=RETURN_ELIGIBLE_STATUSES,
+        ).values_list("id", flat=True)
     )
 
 
@@ -937,16 +951,18 @@ class WorkOrderViewSet(
         # as a plain unlocked .count() for `work_order` itself - its own
         # row is always locked by the caller before this runs. WRH-80's
         # consolidated Primary call additionally counts across every
-        # *non-terminal* supplementary (see _consolidated_still_out_work_
-        # order_ids()) - only the specific supplementary(ies) this request
-        # actually touched are locked, not every supplementary in scope, so
-        # an untouched one isn't fully serialized against by this count;
-        # acceptable today since nothing besides return_item()/return_box()
-        # (both funnel through the Primary's own lock) or a direct close()
-        # (which only ever moves a supplementary *into* one of the excluded
-        # terminal statuses, never adds new still-out items) can change
-        # what this count sees for an untouched supplementary. Shared by
-        # return_item() and return_box() (WRH-26) so both stay on one
+        # RETURN_ELIGIBLE_STATUSES supplementary (see
+        # _consolidated_still_out_work_order_ids()) - only the specific
+        # supplementary(ies) this request actually touched are locked, not
+        # every supplementary in scope, so an untouched one isn't fully
+        # serialized against by this count. A concurrent transfer() off an
+        # untouched supplementary (it only locks its *destination* WO, not
+        # the source) is one gap this doesn't close - an ordinary
+        # read-committed race, not a corrupted value, since the recompute
+        # just lands on whichever committed state happens to be visible;
+        # acceptable today, flagged rather than silently assumed away.
+        # Shared by return_item() and return_box() (WRH-26) so both stay on
+        # one
         # recompute.
         #
         # WRH-80: work_order_ids defaults to just this WO's own id (the
@@ -1016,8 +1032,21 @@ class WorkOrderViewSet(
             # keyed by id, seeded with the already-locked Primary.
             allowed_wo_ids = _returnable_work_order_ids(work_order)
             locked_wos = {work_order.id: work_order}
+            # WRH-80: distinct from locked_wos - only WOs that actually had
+            # an item returned this call, not every WO merely peeked/locked
+            # (see the finalize loop below for why that distinction
+            # matters).
+            actually_returned_wo_ids = set()
 
-            box_items = list(box.items.order_by("serial_number"))
+            # select_related() is safe here (unlike the select_for_update()
+            # calls elsewhere in this file) - this is a plain unlocked
+            # read, not paired with a lock, so the nullable-FK/outer-join
+            # restriction that rules it out there doesn't apply.
+            box_items = list(
+                box.items.select_related("work_order_line_item").order_by(
+                    "serial_number"
+                )
+            )
 
             # WRH-80: unlocked peek of every box item's owning WO first, so
             # every distinct owning WO can be locked *before* any item row -
@@ -1116,6 +1145,7 @@ class WorkOrderViewSet(
                 # already locked above, before any item row, alongside
                 # every other owning WO this box touches.
                 owning_work_order = locked_wos[actual_owner_id]
+                actually_returned_wo_ids.add(actual_owner_id)
 
                 Transaction.objects.create(
                     transaction_type=Transaction.TYPE_RETURN,
@@ -1132,19 +1162,26 @@ class WorkOrderViewSet(
                     }
                 )
 
-            # WRH-80: same split as return_item() - each touched
-            # supplementary finalizes against its own items only, while the
-            # entry Primary finalizes against the consolidated Primary+
-            # supplementaries count (see _finalize_return_status()'s own
-            # comment for why that split matters).
+            # WRH-80: same split as return_item() - each supplementary that
+            # actually had an item returned this call finalizes against its
+            # own items only, while the entry Primary finalizes against the
+            # consolidated Primary+supplementaries count (see
+            # _finalize_return_status()'s own comment for why that split
+            # matters). Deliberately narrower than locked_wos - a
+            # supplementary merely *peeked* (an item of its shared this box
+            # but was rejected, e.g. already returned/closed elsewhere)
+            # never had this call add or change anything on it and must not
+            # have its status recomputed - a closed supplementary in
+            # particular would get silently un-closed by a recompute that
+            # sees its pre-existing STATUS_MISSING items as still-out.
             # refresh=False throughout: none of these instances' own
             # line_items caches are what the response reads from -
             # _refresh_return_summary(work_order) below repopulates
             # work_order.line_items and a fresh work_order.supplementaries
             # (including every touched supplementary) from scratch anyway.
-            for touched_id, touched_work_order in locked_wos.items():
+            for touched_id in actually_returned_wo_ids:
                 if touched_id != work_order.id:
-                    self._finalize_return_status(touched_work_order, refresh=False)
+                    self._finalize_return_status(locked_wos[touched_id], refresh=False)
             self._finalize_return_status(
                 work_order,
                 _consolidated_still_out_work_order_ids(work_order),
