@@ -2106,6 +2106,157 @@ class WorkOrderReturnBoxTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class WorkOrderReturnParentOnlyTests(APITestCase):
+    # WRH-80: return is only ever initiated from a Primary WO and
+    # consolidates its supplementaries into the same flow.
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jane", email="jane@example.com", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.product_type = ProductTypeFactory()
+        self.primary = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        self.primary_line_item = WorkOrderLineItemFactory(
+            work_order=self.primary, product_type=self.product_type, quantity=1
+        )
+        self.supplementary = WorkOrderFactory(
+            status=WorkOrder.STATUS_FULFILLED,
+            parent_work_order=self.primary,
+            supplementary_sequence=1,
+        )
+        self.supplementary_line_item = WorkOrderLineItemFactory(
+            work_order=self.supplementary, product_type=self.product_type, quantity=1
+        )
+
+    def _out_item(self, line_item):
+        return SerializedItemFactory(
+            product_type=self.product_type,
+            work_order_line_item=line_item,
+            status=SerializedItem.STATUS_OUT,
+        )
+
+    def return_item_on(self, work_order, serial_number):
+        return self.client.post(
+            reverse("workorder-return-item", args=[work_order.id]),
+            {"serial_number": serial_number},
+            format="json",
+        )
+
+    def return_box_on(self, work_order, box_code):
+        return self.client.post(
+            reverse("workorder-return-box", args=[work_order.id]),
+            {"box_code": box_code},
+            format="json",
+        )
+
+    def test_return_item_rejects_a_direct_call_on_a_supplementary(self):
+        # AC-1/AC-2/AC-4
+        item = self._out_item(self.supplementary_line_item)
+
+        response = self.return_item_on(self.supplementary, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("work_order", response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+    def test_return_box_rejects_a_direct_call_on_a_supplementary(self):
+        # AC-2/AC-4
+        item = self._out_item(self.supplementary_line_item)
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(id=item.id).update(box=box)
+
+        response = self.return_box_on(self.supplementary, box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("work_order", response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+    def test_return_item_on_parent_accepts_a_serial_issued_on_a_supplementary(self):
+        # AC-1/AC-3/AC-6
+        item = self._out_item(self.supplementary_line_item)
+
+        response = self.return_item_on(self.primary, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+        # AC-6: attributed to the supplementary, not the primary the return
+        # was initiated from.
+        created_transaction = Transaction.objects.get(serialized_item=item)
+        self.assertEqual(created_transaction.work_order_id, self.supplementary.id)
+        self.supplementary.refresh_from_db()
+        self.assertEqual(self.supplementary.status, WorkOrder.STATUS_RETURNED)
+        # AC-3: the response's own consolidated view reflects the
+        # supplementary's fresh state alongside the primary's.
+        supplementary_data = response.data["supplementaries"][0]
+        self.assertEqual(supplementary_data["id"], self.supplementary.id)
+        self.assertEqual(supplementary_data["status"], WorkOrder.STATUS_RETURNED)
+
+    def test_return_box_on_parent_consolidates_items_from_primary_and_supplementary(
+        self,
+    ):
+        # AC-1/AC-3/AC-6
+        primary_item = self._out_item(self.primary_line_item)
+        supplementary_item = self._out_item(self.supplementary_line_item)
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(
+            id__in=[primary_item.id, supplementary_item.id]
+        ).update(box=box)
+
+        response = self.return_box_on(self.primary, box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["box_summary"]["added"], 2)
+        for item in (primary_item, supplementary_item):
+            item.refresh_from_db()
+            self.assertEqual(item.status, SerializedItem.STATUS_AVAILABLE)
+        self.primary.refresh_from_db()
+        self.supplementary.refresh_from_db()
+        self.assertEqual(self.primary.status, WorkOrder.STATUS_RETURNED)
+        self.assertEqual(self.supplementary.status, WorkOrder.STATUS_RETURNED)
+        transactions = {
+            transaction.serialized_item_id: transaction.work_order_id
+            for transaction in Transaction.objects.filter(
+                serialized_item_id__in=[primary_item.id, supplementary_item.id]
+            )
+        }
+        self.assertEqual(transactions[primary_item.id], self.primary.id)
+        self.assertEqual(transactions[supplementary_item.id], self.supplementary.id)
+
+    def test_return_item_still_rejects_a_serial_issued_on_an_unrelated_work_order(
+        self,
+    ):
+        # AC-5: a standalone/unrelated WO's items stay out of scope even
+        # when returning from a Primary that has its own supplementary.
+        unrelated = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        unrelated_line_item = WorkOrderLineItemFactory(
+            work_order=unrelated, product_type=self.product_type
+        )
+        item = self._out_item(unrelated_line_item)
+
+        response = self.return_item_on(self.primary, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+    def test_standalone_work_order_return_is_unaffected(self):
+        # AC-5: a WO with no parent and no supplementaries behaves exactly
+        # as before.
+        standalone = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        line_item = WorkOrderLineItemFactory(
+            work_order=standalone, product_type=self.product_type
+        )
+        item = self._out_item(line_item)
+
+        response = self.return_item_on(standalone, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+
+
 class WorkOrderTransferTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(

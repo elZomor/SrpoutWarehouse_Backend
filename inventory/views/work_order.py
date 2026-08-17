@@ -124,6 +124,59 @@ def _line_items_queryset():
     )
 
 
+def _reject_supplementary_return(work_order):
+    # WRH-80/AC-2/AC-4: return is only ever initiated from a Primary WO -
+    # a supplementary's own detail/QR can still be scanned by a manager, so
+    # this is a real API-level guard (not just a hidden/disabled frontend
+    # button). parent_work_order is set once at creation and never changed
+    # by any other endpoint, so a single check before the row lock is
+    # enough - no re-check-after-lock needed (nothing can race it).
+    if work_order.parent_work_order_id:
+        raise ValidationError(
+            {
+                "work_order": [
+                    "Return must be initiated from the parent work order,"
+                    " not a supplementary."
+                ]
+            }
+        )
+
+
+def _returnable_work_order_ids(work_order):
+    # WRH-80/AC-1/AC-3: a return on a Primary WO also covers every item
+    # issued on its supplementaries - the set of WO ids a scanned serial is
+    # allowed to belong to for this return call.
+    return [work_order.id] + list(
+        WorkOrder.objects.filter(parent_work_order_id=work_order.id).values_list(
+            "id", flat=True
+        )
+    )
+
+
+def _refresh_return_summary(work_order):
+    # WRH-80/AC-3: populates both work_order.line_items and
+    # work_order.supplementaries (each with their own fresh line_items) in
+    # one prefetch, for WorkOrderReturnSerializer's consolidated response -
+    # matches _refresh_line_items()'s "populate the relation the response
+    # serializer reads, no further query" reasoning, extended to also cover
+    # the nested supplementaries relation.
+    prefetch_related_objects(
+        [work_order],
+        Prefetch(
+            "line_items",
+            queryset=_active_line_items_queryset().filter(work_order_id=work_order.id),
+        ),
+        Prefetch(
+            "supplementaries",
+            queryset=WorkOrder.objects.order_by(
+                "supplementary_sequence"
+            ).prefetch_related(
+                Prefetch("line_items", queryset=_active_line_items_queryset())
+            ),
+        ),
+    )
+
+
 def _active_line_items_queryset():
     # WRH-55/AC-2: same one-query-per-list shape as _line_items_queryset(),
     # but counting by SerializedItem.status instead of raw scan count - see
@@ -662,6 +715,7 @@ class WorkOrderViewSet(
         # actions) since DRF's default would otherwise route this to
         # /return_item/ instead of this repo's hyphenated convention.
         work_order = self.get_object()
+        _reject_supplementary_return(work_order)
         if work_order.status not in RETURN_ELIGIBLE_STATUSES:
             raise ValidationError(
                 {"status": ["Work order is not eligible for return."]}
@@ -682,6 +736,12 @@ class WorkOrderViewSet(
                     {"status": ["Work order is not eligible for return."]}
                 )
 
+            # WRH-80/AC-1/AC-3: a scanned serial is accepted if it was
+            # issued on this Primary WO OR any of its supplementaries - a
+            # return initiated from the Primary consolidates all of them
+            # into one flow.
+            allowed_wo_ids = _returnable_work_order_ids(work_order)
+
             # WRH-28/WRH-68: no select_related("work_order_line_item") here -
             # that FK is nullable, so pairing it with select_for_update()
             # produces a LEFT OUTER JOIN Postgres refuses to lock (crashes
@@ -699,13 +759,13 @@ class WorkOrderViewSet(
 
             if (
                 item.work_order_line_item_id is None
-                or item.work_order_line_item.work_order_id != work_order.id
+                or item.work_order_line_item.work_order_id not in allowed_wo_ids
             ):
                 raise ValidationError(
                     {
                         "serial_number": [
                             f"{item.serial_number} was not issued on"
-                            f" WO-{work_order.id}"
+                            f" WO-{work_order.id} or its supplementaries"
                         ]
                     }
                 )
@@ -719,7 +779,7 @@ class WorkOrderViewSet(
                 # DAMAGED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION already
                 # categorize this item correctly (damaged, not still-out) so
                 # no extra bookkeeping is needed.
-                self._refresh_line_items(work_order, _active_line_items_queryset)
+                _refresh_return_summary(work_order)
                 return Response(WorkOrderReturnSerializer(work_order).data, status=200)
             if item.status != SerializedItem.STATUS_OUT:
                 raise ValidationError(
@@ -755,17 +815,30 @@ class WorkOrderViewSet(
             )
             item.save(update_fields=["status"])
 
+            # WRH-80/AC-6: attribute the Transaction/status update to the
+            # item's actual owning WO (Primary or the specific
+            # supplementary it was issued on), not always to the Primary
+            # the return was initiated from - keeps history traceable per
+            # AC-6 even though the scan itself came in through the Primary.
+            owning_wo_id = item.work_order_line_item.work_order_id
+            owning_work_order = (
+                work_order
+                if owning_wo_id == work_order.id
+                else WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
+            )
+
             Transaction.objects.create(
                 transaction_type=(
                     Transaction.TYPE_DAMAGED if damaged else Transaction.TYPE_RETURN
                 ),
                 serialized_item=item,
-                work_order=work_order,
-                reference_number=f"WO-{work_order.id}",
+                work_order=owning_work_order,
+                reference_number=f"WO-{owning_work_order.id}",
                 user=request.user,
             )
 
-            self._finalize_return_status(work_order)
+            self._finalize_return_status(owning_work_order)
+            _refresh_return_summary(work_order)
 
         return Response(WorkOrderReturnSerializer(work_order).data, status=200)
 
@@ -805,6 +878,7 @@ class WorkOrderViewSet(
         # damaged=True is a single-item-scan-only refinement, not part of
         # this ticket's scope).
         work_order = self.get_object()
+        _reject_supplementary_return(work_order)
         if work_order.status not in RETURN_ELIGIBLE_STATUSES:
             raise ValidationError(
                 {"status": ["Work order is not eligible for return."]}
@@ -827,6 +901,14 @@ class WorkOrderViewSet(
                     {"status": ["Work order is not eligible for return."]}
                 )
 
+            # WRH-80/AC-1/AC-3: same Primary+supplementaries scope as
+            # return_item(); a box can hold items issued on more than one of
+            # them. locked_wos accumulates every distinct owning WO this box
+            # actually touches, so each gets its own status finalized below -
+            # keyed by id, seeded with the already-locked Primary.
+            allowed_wo_ids = _returnable_work_order_ids(work_order)
+            locked_wos = {work_order.id: work_order}
+
             for item in box.items.order_by("serial_number"):
                 # WRH-28: no select_related("work_order_line_item") here -
                 # that FK is nullable, so pairing it with select_for_update()
@@ -839,7 +921,8 @@ class WorkOrderViewSet(
                 locked_item = SerializedItem.objects.select_for_update().get(pk=item.pk)
                 if (
                     locked_item.work_order_line_item_id is None
-                    or locked_item.work_order_line_item.work_order_id != work_order.id
+                    or locked_item.work_order_line_item.work_order_id
+                    not in allowed_wo_ids
                 ):
                     results.append(
                         {
@@ -847,7 +930,7 @@ class WorkOrderViewSet(
                             "added": False,
                             "reason": (
                                 f"{locked_item.serial_number} was not issued on"
-                                f" WO-{work_order.id}"
+                                f" WO-{work_order.id} or its supplementaries"
                             ),
                         }
                     )
@@ -886,11 +969,24 @@ class WorkOrderViewSet(
 
                 locked_item.status = SerializedItem.STATUS_AVAILABLE
                 locked_item.save(update_fields=["status"])
+
+                # WRH-80/AC-6: attribute this Transaction to the item's
+                # actual owning WO (Primary or the specific supplementary),
+                # locking it (once per distinct id) the same way the
+                # Primary already is - matches return_item()'s identical
+                # reasoning.
+                owning_wo_id = locked_item.work_order_line_item.work_order_id
+                if owning_wo_id not in locked_wos:
+                    locked_wos[owning_wo_id] = (
+                        WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
+                    )
+                owning_work_order = locked_wos[owning_wo_id]
+
                 Transaction.objects.create(
                     transaction_type=Transaction.TYPE_RETURN,
                     serialized_item=locked_item,
-                    work_order=work_order,
-                    reference_number=f"WO-{work_order.id}",
+                    work_order=owning_work_order,
+                    reference_number=f"WO-{owning_work_order.id}",
                     user=request.user,
                 )
                 results.append(
@@ -901,7 +997,9 @@ class WorkOrderViewSet(
                     }
                 )
 
-            self._finalize_return_status(work_order)
+            for touched_work_order in locked_wos.values():
+                self._finalize_return_status(touched_work_order)
+            _refresh_return_summary(work_order)
 
         return Response(
             {
