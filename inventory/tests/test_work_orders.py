@@ -2340,6 +2340,48 @@ class WorkOrderReturnParentOnlyTests(APITestCase):
         item.refresh_from_db()
         self.assertEqual(item.status, SerializedItem.STATUS_OUT)
 
+    def test_return_item_rejects_an_item_transferred_onto_an_in_progress_supplementary(
+        self,
+    ):
+        # Review finding: transfer() allows any non-terminal destination
+        # WO, including a draft/in_progress supplementary that hasn't gone
+        # through complete() yet. Such a supplementary must not participate
+        # in the Primary's consolidated return - accepting its item would
+        # force it straight to STATUS_RETURNED/STATUS_PARTIALLY_RETURNED,
+        # skipping its own WRH-54 fulfillment lifecycle.
+        in_progress_supplementary = WorkOrderFactory(
+            status=WorkOrder.STATUS_IN_PROGRESS,
+            parent_work_order=self.primary,
+            supplementary_sequence=2,
+        )
+        in_progress_line_item = WorkOrderLineItemFactory(
+            work_order=in_progress_supplementary, product_type=self.product_type
+        )
+        donor_work_order = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        donor_line_item = WorkOrderLineItemFactory(
+            work_order=donor_work_order, product_type=self.product_type
+        )
+        item = self._out_item(donor_line_item)
+
+        transfer_response = self.client.post(
+            reverse("workorder-transfer", args=[donor_work_order.id]),
+            {
+                "serial_number": item.serial_number,
+                "destination_work_order": in_progress_supplementary.id,
+                "destination_line_item": in_progress_line_item.id,
+            },
+            format="json",
+        )
+        self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+
+        response = self.return_item_on(self.primary, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        in_progress_supplementary.refresh_from_db()
+        self.assertEqual(in_progress_supplementary.status, WorkOrder.STATUS_IN_PROGRESS)
+
     def test_standalone_work_order_return_is_unaffected(self):
         # AC-5: a WO with no parent and no supplementaries behaves exactly
         # as before.

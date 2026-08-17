@@ -145,20 +145,12 @@ def _reject_supplementary_return(work_order):
 def _returnable_work_order_ids(work_order):
     # WRH-80/AC-1/AC-3: a return on a Primary WO also covers every item
     # issued on its supplementaries - the set of WO ids a scanned serial is
-    # allowed to belong to for this return call.
-    return [work_order.id] + list(
-        WorkOrder.objects.filter(parent_work_order_id=work_order.id).values_list(
-            "id", flat=True
-        )
-    )
-
-
-def _consolidated_still_out_work_order_ids(work_order):
-    # WRH-80: the Primary's own consolidated status is finalized from this
-    # scope, deliberately narrower than _returnable_work_order_ids() above -
-    # only supplementaries currently in RETURN_ELIGIBLE_STATUSES
-    # (fulfilled/partially_returned) actually count. That excludes two
-    # different kinds of supplementary the count must not be sensitive to:
+    # allowed to belong to for this return call, and (this same set) what
+    # the Primary's own consolidated still-out status is finalized against.
+    #
+    # Scoped to RETURN_ELIGIBLE_STATUSES (fulfilled/partially_returned)
+    # supplementaries only - excludes two different kinds of supplementary
+    # that must not participate in a consolidated return at all:
     #
     # - A supplementary that's already reached a _TERMINAL_STATUSES status
     #   (e.g. manually close()'d directly, on its own, with items still out
@@ -175,12 +167,16 @@ def _consolidated_still_out_work_order_ids(work_order):
     # - A supplementary still mid-fulfillment (draft/in_progress - WRH-53
     #   supplementaries are created and fulfilled independently of their
     #   Primary, so one can still be in_progress while the Primary is
-    #   already fulfilled) can have SerializedItems sitting at
-    #   STATUS_RESERVED, which NOT_STILL_OUT_STATUSES does NOT exclude
-    #   (a reserved item is a real, current claim, not a resolved outcome)
-    #   - without this exclusion those reserved-but-not-yet-issued items
-    #   would count as "still out" against the Primary even though this
-    #   supplementary isn't part of any return flow yet.
+    #   already fulfilled) hasn't been through complete() yet. Its items
+    #   can be STATUS_RESERVED (not excluded by NOT_STILL_OUT_STATUSES) or
+    #   even STATUS_OUT if something transfer()'d an item onto it directly
+    #   (transfer() only rejects a _TERMINAL_STATUSES destination, not a
+    #   draft/in_progress one) - accepting either as part of the Primary's
+    #   return would either inflate the still-out count with a claim that
+    #   was never "issued" in the return sense, or force this
+    #   not-yet-fulfilled supplementary straight to STATUS_RETURNED/
+    #   STATUS_PARTIALLY_RETURNED, skipping its own WRH-54 fulfillment
+    #   lifecycle entirely.
     return [work_order.id] + list(
         WorkOrder.objects.filter(
             parent_work_order_id=work_order.id,
@@ -788,7 +784,9 @@ class WorkOrderViewSet(
             # learn which WO owns the item before locking anything else -
             # see the WRH-80 lock-order comment right below.
             try:
-                item_peek = SerializedItem.objects.get(serial_number=serial_number)
+                item_peek = SerializedItem.objects.select_related(
+                    "work_order_line_item"
+                ).get(serial_number=serial_number)
             except SerializedItem.DoesNotExist:
                 raise ValidationError({"serial_number": ["Serial not found"]})
             peeked_owner_id = (
@@ -832,11 +830,16 @@ class WorkOrderViewSet(
                 else None
             )
             if actual_owner_id is None or actual_owner_id not in allowed_wo_ids:
+                # WRH-80: message text deliberately unchanged from before
+                # this ticket (no "or its supplementaries" suffix) - the
+                # frontend's NOT_ISSUED_PATTERN regex is end-anchored on
+                # exactly this "...WO-<id>" shape and this exact rejection
+                # already fires for the plain, non-consolidated case too.
                 raise ValidationError(
                     {
                         "serial_number": [
                             f"{item.serial_number} was not issued on"
-                            f" WO-{work_order.id} or its supplementaries"
+                            f" WO-{work_order.id}"
                         ]
                     }
                 )
@@ -906,13 +909,20 @@ class WorkOrderViewSet(
             # issued on), not always to the Primary the return was
             # initiated from - keeps history traceable per AC-6 even
             # though the scan itself came in through the Primary.
+            # reference_number uses _work_order_reference() (not a bare
+            # f"WO-{id}") - owning_work_order can now genuinely be a
+            # supplementary, and transfer() already establishes that a
+            # supplementary's reference_number must render as its display
+            # identifier ("WO-<primary>-S<seq>"), not its own raw pk,
+            # since TransactionFilterSet.reference_number is an exact
+            # match against that display string.
             Transaction.objects.create(
                 transaction_type=(
                     Transaction.TYPE_DAMAGED if damaged else Transaction.TYPE_RETURN
                 ),
                 serialized_item=item,
                 work_order=owning_work_order,
-                reference_number=f"WO-{owning_work_order.id}",
+                reference_number=_work_order_reference(owning_work_order),
                 user=request.user,
             )
 
@@ -935,7 +945,7 @@ class WorkOrderViewSet(
                 self._finalize_return_status(owning_work_order, refresh=False)
             self._finalize_return_status(
                 work_order,
-                _consolidated_still_out_work_order_ids(work_order),
+                _returnable_work_order_ids(work_order),
                 refresh=False,
             )
             _refresh_return_summary(work_order)
@@ -952,7 +962,7 @@ class WorkOrderViewSet(
         # row is always locked by the caller before this runs. WRH-80's
         # consolidated Primary call additionally counts across every
         # RETURN_ELIGIBLE_STATUSES supplementary (see
-        # _consolidated_still_out_work_order_ids()) - only the specific
+        # _returnable_work_order_ids()) - only the specific
         # supplementary(ies) this request actually touched are locked, not
         # every supplementary in scope, so an untouched one isn't fully
         # serialized against by this count. A concurrent transfer() off an
@@ -962,14 +972,13 @@ class WorkOrderViewSet(
         # just lands on whichever committed state happens to be visible;
         # acceptable today, flagged rather than silently assumed away.
         # Shared by return_item() and return_box() (WRH-26) so both stay on
-        # one
-        # recompute.
+        # one recompute.
         #
         # WRH-80: work_order_ids defaults to just this WO's own id (the
         # original, pre-consolidation behavior - what a supplementary's own
         # status, or a standalone WO's, is always finalized against). The
         # entry-point Primary of a consolidated return instead finalizes
-        # against _consolidated_still_out_work_order_ids() (see return_item()/
+        # against _returnable_work_order_ids() (see return_item()/
         # return_box()'s own callers) - otherwise the Primary could reach
         # STATUS_RETURNED from only its own items while a supplementary
         # still has items out, which would then fail this action's
@@ -1100,7 +1109,7 @@ class WorkOrderViewSet(
                             "added": False,
                             "reason": (
                                 f"{locked_item.serial_number} was not issued on"
-                                f" WO-{work_order.id} or its supplementaries"
+                                f" WO-{work_order.id}"
                             ),
                         }
                     )
@@ -1143,7 +1152,10 @@ class WorkOrderViewSet(
                 # WRH-80/AC-6: attribute this Transaction to the item's
                 # actual owning WO (Primary or the specific supplementary) -
                 # already locked above, before any item row, alongside
-                # every other owning WO this box touches.
+                # every other owning WO this box touches. reference_number
+                # uses _work_order_reference() - see return_item()'s
+                # identical comment for why a bare f"WO-{id}" is wrong once
+                # owning_work_order can be a supplementary.
                 owning_work_order = locked_wos[actual_owner_id]
                 actually_returned_wo_ids.add(actual_owner_id)
 
@@ -1151,7 +1163,7 @@ class WorkOrderViewSet(
                     transaction_type=Transaction.TYPE_RETURN,
                     serialized_item=locked_item,
                     work_order=owning_work_order,
-                    reference_number=f"WO-{owning_work_order.id}",
+                    reference_number=_work_order_reference(owning_work_order),
                     user=request.user,
                 )
                 results.append(
@@ -1184,7 +1196,7 @@ class WorkOrderViewSet(
                     self._finalize_return_status(locked_wos[touched_id], refresh=False)
             self._finalize_return_status(
                 work_order,
-                _consolidated_still_out_work_order_ids(work_order),
+                _returnable_work_order_ids(work_order),
                 refresh=False,
             )
             _refresh_return_summary(work_order)
