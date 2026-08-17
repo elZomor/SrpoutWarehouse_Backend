@@ -2315,6 +2315,53 @@ class WorkOrderReturnParentOnlyTests(APITestCase):
         self.assertEqual(self.primary.status, WorkOrder.STATUS_RETURNED)
         self.assertEqual(self.supplementary.status, WorkOrder.STATUS_RETURNED)
 
+    def test_a_closed_supplementarys_missing_item_does_not_block_primary_forever(
+        self,
+    ):
+        # Review finding: close() has no _reject_supplementary_return()
+        # guard - a manager can close() a supplementary directly while it
+        # still has an item out, which flips that item to STATUS_MISSING (a
+        # permanent, terminal outcome for that now-closed WO). The Primary's
+        # own consolidated status must not count that permanently-missing
+        # item as still-out forever - once the Primary's own item is back,
+        # it must reach STATUS_RETURNED, not stay stuck at
+        # STATUS_PARTIALLY_RETURNED indefinitely.
+        primary_item = self._out_item(self.primary_line_item)
+        self._out_item(self.supplementary_line_item)
+
+        close_response = self.client.post(
+            reverse("workorder-close", args=[self.supplementary.id])
+        )
+        self.assertEqual(close_response.status_code, status.HTTP_200_OK)
+        self.supplementary.refresh_from_db()
+        self.assertEqual(self.supplementary.status, WorkOrder.STATUS_CLOSED)
+
+        response = self.return_item_on(self.primary, primary_item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        self.primary.refresh_from_db()
+        self.assertEqual(self.primary.status, WorkOrder.STATUS_RETURNED)
+
+    def test_return_item_does_not_lock_an_unrelated_work_order(self):
+        # Review finding: return_item() used to lock a peeked owning WO's
+        # row before checking it was actually in scope (Primary + its
+        # supplementaries). An item issued on some unrelated WO must be
+        # rejected without ever locking/touching that unrelated WO.
+        unrelated = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        unrelated_line_item = WorkOrderLineItemFactory(
+            work_order=unrelated, product_type=self.product_type
+        )
+        item = self._out_item(unrelated_line_item)
+
+        response = self.return_item_on(self.primary, item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        self.assertEqual(item.status, SerializedItem.STATUS_OUT)
+        unrelated.refresh_from_db()
+        self.assertEqual(unrelated.status, WorkOrder.STATUS_FULFILLED)
+
     def test_close_response_reports_real_supplementary_counts(self):
         # WRH-80 review finding: close() now serializes with
         # WorkOrderReturnSerializer, which gained a supplementaries field -

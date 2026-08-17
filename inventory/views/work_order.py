@@ -153,6 +153,28 @@ def _returnable_work_order_ids(work_order):
     )
 
 
+def _consolidated_still_out_work_order_ids(work_order):
+    # WRH-80: the Primary's own consolidated status is finalized from this
+    # scope, deliberately narrower than _returnable_work_order_ids() above -
+    # a supplementary that's already reached a _TERMINAL_STATUSES status
+    # (e.g. manually close()'d direct, on its own, with items still out -
+    # close() has no _reject_supplementary_return() guard, since closing a
+    # straggling supplementary independently is legitimate WRH-40 behavior)
+    # is done; its own STATUS_MISSING leftovers are a permanent, resolved
+    # outcome for that WO the same way NOT_STILL_OUT_STATUSES already
+    # treats STATUS_DAMAGED/STATUS_WRITTEN_OFF/STATUS_IN_MAINTENANCE -
+    # counting them against the *Primary* forever would mean a closed
+    # supplementary permanently blocks the Primary from ever reaching
+    # STATUS_RETURNED, even once every one of the Primary's own items is
+    # genuinely back. Matches the "active" list's identical
+    # non_terminal_supplementary exclusion (WRH-69).
+    return [work_order.id] + list(
+        WorkOrder.objects.filter(parent_work_order_id=work_order.id)
+        .exclude(status__in=_TERMINAL_STATUSES)
+        .values_list("id", flat=True)
+    )
+
+
 def _refresh_return_summary(work_order):
     # WRH-80/AC-3: populates both work_order.line_items and
     # work_order.supplementaries (each with their own fresh line_items) in
@@ -767,8 +789,16 @@ class WorkOrderViewSet(
             # and close() both already lock their WorkOrder row(s) before
             # any item row; locking the item first here would reverse
             # that order for exactly this owning-WO's row and risk an
-            # AB-BA deadlock against a concurrent close() on it.
-            if peeked_owner_id is not None and peeked_owner_id != work_order.id:
+            # AB-BA deadlock against a concurrent close() on it. Only lock
+            # it if it's actually in scope (Primary + its supplementaries)
+            # - an item owned by some unrelated WO is rejected below
+            # without ever locking that unrelated WO's row, matching
+            # return_box()'s identical scoping.
+            if (
+                peeked_owner_id is not None
+                and peeked_owner_id in allowed_wo_ids
+                and peeked_owner_id != work_order.id
+            ):
                 owning_work_order = WorkOrder.objects.select_for_update().get(
                     pk=peeked_owner_id
                 )
@@ -889,7 +919,11 @@ class WorkOrderViewSet(
             # (including this owning WO, if it's one) from scratch anyway.
             if owning_work_order.id != work_order.id:
                 self._finalize_return_status(owning_work_order, refresh=False)
-            self._finalize_return_status(work_order, allowed_wo_ids, refresh=False)
+            self._finalize_return_status(
+                work_order,
+                _consolidated_still_out_work_order_ids(work_order),
+                refresh=False,
+            )
             _refresh_return_summary(work_order)
 
         return Response(WorkOrderReturnSerializer(work_order).data, status=200)
@@ -900,20 +934,26 @@ class WorkOrderViewSet(
         # WRH-57/AC-3) so a missing item doesn't silently vanish from this
         # count instead of keeping the WO at partially_returned, while a
         # damaged one no longer keeps the WO out of "returned" either. Safe
-        # as a plain unlocked .count() only because every WO row this can
-        # be counting across is already locked by the caller before this
-        # runs - the entry Primary always is, and return_item()/
-        # return_box() lock every supplementary they actually touch too
-        # (see their own lock-order comments) - so concurrent writers
-        # against any of these WOs' items are already serialized by the
-        # time this runs. Shared by return_item() and return_box()
-        # (WRH-26) so both stay on one recompute.
+        # as a plain unlocked .count() for `work_order` itself - its own
+        # row is always locked by the caller before this runs. WRH-80's
+        # consolidated Primary call additionally counts across every
+        # *non-terminal* supplementary (see _consolidated_still_out_work_
+        # order_ids()) - only the specific supplementary(ies) this request
+        # actually touched are locked, not every supplementary in scope, so
+        # an untouched one isn't fully serialized against by this count;
+        # acceptable today since nothing besides return_item()/return_box()
+        # (both funnel through the Primary's own lock) or a direct close()
+        # (which only ever moves a supplementary *into* one of the excluded
+        # terminal statuses, never adds new still-out items) can change
+        # what this count sees for an untouched supplementary. Shared by
+        # return_item() and return_box() (WRH-26) so both stay on one
+        # recompute.
         #
         # WRH-80: work_order_ids defaults to just this WO's own id (the
         # original, pre-consolidation behavior - what a supplementary's own
         # status, or a standalone WO's, is always finalized against). The
         # entry-point Primary of a consolidated return instead finalizes
-        # against itself *and* every supplementary (see return_item()/
+        # against _consolidated_still_out_work_order_ids() (see return_item()/
         # return_box()'s own callers) - otherwise the Primary could reach
         # STATUS_RETURNED from only its own items while a supplementary
         # still has items out, which would then fail this action's
@@ -994,13 +1034,12 @@ class WorkOrderViewSet(
             # out of scope for this return call entirely (rejected below,
             # same as return_item()'s identical rejection), so that WO must
             # never be locked or have its status touched by this call.
-            peeked_owner_by_item_id = {}
-            for item in box_items:
-                if item.work_order_line_item_id:
-                    peeked_owner_by_item_id[item.id] = (
-                        item.work_order_line_item.work_order_id
-                    )
-            for owning_wo_id in sorted(set(peeked_owner_by_item_id.values())):
+            peeked_owner_ids = {
+                item.work_order_line_item.work_order_id
+                for item in box_items
+                if item.work_order_line_item_id
+            }
+            for owning_wo_id in sorted(peeked_owner_ids):
                 if owning_wo_id in allowed_wo_ids and owning_wo_id not in locked_wos:
                     locked_wos[owning_wo_id] = (
                         WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
@@ -1106,7 +1145,11 @@ class WorkOrderViewSet(
             for touched_id, touched_work_order in locked_wos.items():
                 if touched_id != work_order.id:
                     self._finalize_return_status(touched_work_order, refresh=False)
-            self._finalize_return_status(work_order, allowed_wo_ids, refresh=False)
+            self._finalize_return_status(
+                work_order,
+                _consolidated_still_out_work_order_ids(work_order),
+                refresh=False,
+            )
             _refresh_return_summary(work_order)
 
         return Response(
