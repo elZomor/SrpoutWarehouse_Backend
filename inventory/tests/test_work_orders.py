@@ -2256,6 +2256,57 @@ class WorkOrderReturnParentOnlyTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
 
+    def test_primary_stays_partially_returned_while_supplementary_item_still_out(
+        self,
+    ):
+        # AC-3/AC-6: the Primary's own status must reflect the consolidated
+        # Primary+supplementaries state, not just its own items - otherwise
+        # once the Primary's own item comes back it would reach
+        # STATUS_RETURNED while the supplementary's item is still out,
+        # which would then fail this action's own RETURN_ELIGIBLE_STATUSES
+        # re-check on the very next call and block returning the rest of
+        # the consolidated flow.
+        primary_item = self._out_item(self.primary_line_item)
+        supplementary_item = self._out_item(self.supplementary_line_item)
+
+        response = self.return_item_on(self.primary, primary_item.serial_number)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_PARTIALLY_RETURNED)
+        self.primary.refresh_from_db()
+        self.assertEqual(self.primary.status, WorkOrder.STATUS_PARTIALLY_RETURNED)
+
+        # The consolidated flow must still be reachable - a premature
+        # STATUS_RETURNED on the primary would 400 this next call.
+        response = self.return_item_on(self.primary, supplementary_item.serial_number)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], WorkOrder.STATUS_RETURNED)
+        self.primary.refresh_from_db()
+        self.supplementary.refresh_from_db()
+        self.assertEqual(self.primary.status, WorkOrder.STATUS_RETURNED)
+        self.assertEqual(self.supplementary.status, WorkOrder.STATUS_RETURNED)
+
+    def test_close_response_reports_real_supplementary_counts(self):
+        # WRH-80 review finding: close() now serializes with
+        # WorkOrderReturnSerializer, which gained a supplementaries field -
+        # its counts must be the supplementary's real returned/still-out
+        # numbers, not a fallback zero from an unannotated query.
+        self._out_item(self.primary_line_item)
+        supplementary_item = self._out_item(self.supplementary_line_item)
+
+        response = self.client.post(reverse("workorder-close", args=[self.primary.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        supplementary_data = response.data["work_order"]["supplementaries"][0]
+        line_item_data = supplementary_data["line_items"][0]
+        # close() on the Primary only sweeps the Primary's own items
+        # (unchanged by this ticket - consolidating close() itself is out
+        # of WRH-80's scope), so the supplementary's item is untouched and
+        # still counted as out.
+        self.assertEqual(line_item_data["still_out_quantity"], 1)
+        supplementary_item.refresh_from_db()
+        self.assertEqual(supplementary_item.status, SerializedItem.STATUS_OUT)
+
 
 class WorkOrderTransferTests(APITestCase):
     def setUp(self):

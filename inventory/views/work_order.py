@@ -748,24 +748,66 @@ class WorkOrderViewSet(
             # on every call, not just a stale-FK one) - invisible on this
             # repo's SQLite-backed CI. Matches return_box()/transfer()'s
             # identical fix; this call site was flagged but left unfixed by
-            # WRH-28 itself. The lazy follow-up query below only fires on
-            # the rejection branch.
+            # WRH-28 itself. This is an *unlocked* peek only, purely to
+            # learn which WO owns the item before locking anything else -
+            # see the WRH-80 lock-order comment right below.
             try:
-                item = SerializedItem.objects.select_for_update().get(
-                    serial_number=serial_number
-                )
+                item_peek = SerializedItem.objects.get(serial_number=serial_number)
             except SerializedItem.DoesNotExist:
                 raise ValidationError({"serial_number": ["Serial not found"]})
+            peeked_owner_id = (
+                item_peek.work_order_line_item.work_order_id
+                if item_peek.work_order_line_item_id
+                else None
+            )
 
-            if (
-                item.work_order_line_item_id is None
-                or item.work_order_line_item.work_order_id not in allowed_wo_ids
-            ):
+            # WRH-80: when the item is owned by a supplementary (not the
+            # already-locked Primary), lock that supplementary's
+            # WorkOrder row *before* the item row - transfer() (WRH-68)
+            # and close() both already lock their WorkOrder row(s) before
+            # any item row; locking the item first here would reverse
+            # that order for exactly this owning-WO's row and risk an
+            # AB-BA deadlock against a concurrent close() on it.
+            if peeked_owner_id is not None and peeked_owner_id != work_order.id:
+                owning_work_order = WorkOrder.objects.select_for_update().get(
+                    pk=peeked_owner_id
+                )
+            else:
+                owning_work_order = work_order
+
+            item = SerializedItem.objects.select_for_update().get(pk=item_peek.pk)
+
+            # Re-check ownership against the now-locked row - it can have
+            # changed in the window between the unlocked peek above and
+            # this lock (e.g. a concurrent scan() reassigning it), same
+            # "re-check after acquiring the lock" convention as the
+            # archived-product-type guard (WRH-56).
+            actual_owner_id = (
+                item.work_order_line_item.work_order_id
+                if item.work_order_line_item_id
+                else None
+            )
+            if actual_owner_id is None or actual_owner_id not in allowed_wo_ids:
                 raise ValidationError(
                     {
                         "serial_number": [
                             f"{item.serial_number} was not issued on"
                             f" WO-{work_order.id} or its supplementaries"
+                        ]
+                    }
+                )
+            if actual_owner_id != peeked_owner_id:
+                # The item was reassigned to a different (still allowed)
+                # WO between the peek and the lock - owning_work_order was
+                # locked for the wrong row. Rather than lock another row
+                # inside this already-open transaction (which could itself
+                # deadlock), reject this scan cleanly; a retry re-peeks
+                # and locks correctly.
+                raise ValidationError(
+                    {
+                        "serial_number": [
+                            f"{item.serial_number} changed work orders while"
+                            " this return was in progress - please retry"
                         ]
                     }
                 )
@@ -815,18 +857,11 @@ class WorkOrderViewSet(
             )
             item.save(update_fields=["status"])
 
-            # WRH-80/AC-6: attribute the Transaction/status update to the
-            # item's actual owning WO (Primary or the specific
-            # supplementary it was issued on), not always to the Primary
-            # the return was initiated from - keeps history traceable per
-            # AC-6 even though the scan itself came in through the Primary.
-            owning_wo_id = item.work_order_line_item.work_order_id
-            owning_work_order = (
-                work_order
-                if owning_wo_id == work_order.id
-                else WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
-            )
-
+            # WRH-80/AC-6: attribute the Transaction to the item's actual
+            # owning WO (Primary or the specific supplementary it was
+            # issued on), not always to the Primary the return was
+            # initiated from - keeps history traceable per AC-6 even
+            # though the scan itself came in through the Primary.
             Transaction.objects.create(
                 transaction_type=(
                     Transaction.TYPE_DAMAGED if damaged else Transaction.TYPE_RETURN
@@ -837,27 +872,54 @@ class WorkOrderViewSet(
                 user=request.user,
             )
 
-            self._finalize_return_status(owning_work_order)
+            # WRH-80: the owning supplementary's own status reflects only
+            # its own items (unchanged from before this ticket - other
+            # actions/the active list read it that way). The entry-point
+            # Primary's status is finalized separately from the
+            # *consolidated* count across itself and every supplementary -
+            # not just its own items - otherwise the Primary could reach
+            # STATUS_RETURNED while a supplementary still has items out,
+            # which then fails this action's own RETURN_ELIGIBLE_STATUSES
+            # re-check on the next call and blocks the rest of the
+            # consolidated return entirely.
+            if owning_work_order.id != work_order.id:
+                self._finalize_return_status(owning_work_order)
+            self._finalize_return_status(work_order, allowed_wo_ids, refresh=False)
             _refresh_return_summary(work_order)
 
         return Response(WorkOrderReturnSerializer(work_order).data, status=200)
 
-    def _finalize_return_status(self, work_order):
+    def _finalize_return_status(self, work_order, work_order_ids=None, refresh=True):
         # Matches RETURNED_COUNT_ANNOTATION/STILL_OUT_COUNT_ANNOTATION's
         # definition (still out = anything but available or damaged -
         # WRH-57/AC-3) so a missing item doesn't silently vanish from this
         # count instead of keeping the WO at partially_returned, while a
         # damaged one no longer keeps the WO out of "returned" either. Safe
-        # as a plain unlocked .count() only because the parent WorkOrder row
-        # is already locked by the caller - every status-mutating action on
-        # this WO (start/scan/complete/return_item/return_box) takes that
-        # same lock first, so concurrent writers against this WO's items are
-        # already serialized by the time this runs. Shared by return_item()
-        # and return_box() (WRH-26) so both stay on one recompute.
+        # as a plain unlocked .count() only because every WO row this can
+        # be counting across is already locked by the caller before this
+        # runs - the entry Primary always is, and return_item()/
+        # return_box() lock every supplementary they actually touch too
+        # (see their own lock-order comments) - so concurrent writers
+        # against any of these WOs' items are already serialized by the
+        # time this runs. Shared by return_item() and return_box()
+        # (WRH-26) so both stay on one recompute.
+        #
+        # WRH-80: work_order_ids defaults to just this WO's own id (the
+        # original, pre-consolidation behavior - what a supplementary's own
+        # status, or a standalone WO's, is always finalized against). The
+        # entry-point Primary of a consolidated return instead finalizes
+        # against itself *and* every supplementary (see return_item()/
+        # return_box()'s own callers) - otherwise the Primary could reach
+        # STATUS_RETURNED from only its own items while a supplementary
+        # still has items out, which would then fail this action's
+        # RETURN_ELIGIBLE_STATUSES re-check on the very next call and block
+        # the rest of the consolidated return. refresh=False lets a caller
+        # that's about to run _refresh_return_summary() anyway (which
+        # re-populates the same line_items relation, plus supplementaries)
+        # skip this method's own redundant prefetch.
+        ids = work_order_ids if work_order_ids is not None else [work_order.id]
         still_out = (
-            SerializedItem.objects.filter(
-                work_order_line_item__work_order_id=work_order.id
-            )
+            SerializedItem.objects.filter(work_order_line_item__work_order_id__in=ids)
             .exclude(status__in=NOT_STILL_OUT_STATUSES)
             .count()
         )
@@ -867,7 +929,8 @@ class WorkOrderViewSet(
             else WorkOrder.STATUS_PARTIALLY_RETURNED
         )
         work_order.save(update_fields=["status"])
-        self._refresh_line_items(work_order, _active_line_items_queryset)
+        if refresh:
+            self._refresh_line_items(work_order, _active_line_items_queryset)
 
     @action(detail=True, methods=["post"], url_path="return-box")
     def return_box(self, request, pk=None):
@@ -909,20 +972,49 @@ class WorkOrderViewSet(
             allowed_wo_ids = _returnable_work_order_ids(work_order)
             locked_wos = {work_order.id: work_order}
 
-            for item in box.items.order_by("serial_number"):
-                # WRH-28: no select_related("work_order_line_item") here -
-                # that FK is nullable, so pairing it with select_for_update()
-                # produces a LEFT OUTER JOIN Postgres refuses to lock ("FOR
-                # UPDATE cannot be applied to the nullable side of an outer
-                # join"), invisible on this repo's SQLite-backed CI. The
-                # lazy follow-up query below only fires on the rare
-                # not-issued-on-this-WO rejection path, matching WRH-27's
-                # identical fix for BoxSerializer.create().
+            box_items = list(box.items.order_by("serial_number"))
+
+            # WRH-80: unlocked peek of every box item's owning WO first, so
+            # every distinct owning WO can be locked *before* any item row -
+            # transfer() (WRH-68) and close() both already lock their
+            # WorkOrder row(s) before any item row; locking an item first
+            # and only then a not-yet-locked owning WO (as a single-item
+            # return_item() scan would if it worked the same way) risks an
+            # AB-BA deadlock against a concurrent close() on that WO. Locked
+            # in ascending id order so two concurrent return_box() calls
+            # touching an overlapping set of WOs can't deadlock against each
+            # other either.
+            peeked_owner_by_item_id = {}
+            for item in box_items:
+                if item.work_order_line_item_id:
+                    peeked_owner_by_item_id[item.id] = (
+                        item.work_order_line_item.work_order_id
+                    )
+            for owning_wo_id in sorted(set(peeked_owner_by_item_id.values())):
+                if owning_wo_id not in locked_wos:
+                    locked_wos[owning_wo_id] = (
+                        WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
+                    )
+
+            for item in box_items:
                 locked_item = SerializedItem.objects.select_for_update().get(pk=item.pk)
+                # Re-check ownership against the now-locked row - it can
+                # have changed since the unlocked peek above (e.g. a
+                # concurrent scan() reassigning it), same "re-check after
+                # acquiring the lock" convention as the archived-guard
+                # (WRH-56). A reassignment to a WO this call didn't peek
+                # (and so didn't lock) is rejected rather than locked here,
+                # for the same reason return_item() rejects instead of
+                # locking mid-loop.
+                actual_owner_id = (
+                    locked_item.work_order_line_item.work_order_id
+                    if locked_item.work_order_line_item_id
+                    else None
+                )
                 if (
-                    locked_item.work_order_line_item_id is None
-                    or locked_item.work_order_line_item.work_order_id
-                    not in allowed_wo_ids
+                    actual_owner_id is None
+                    or actual_owner_id not in allowed_wo_ids
+                    or actual_owner_id not in locked_wos
                 ):
                     results.append(
                         {
@@ -971,16 +1063,10 @@ class WorkOrderViewSet(
                 locked_item.save(update_fields=["status"])
 
                 # WRH-80/AC-6: attribute this Transaction to the item's
-                # actual owning WO (Primary or the specific supplementary),
-                # locking it (once per distinct id) the same way the
-                # Primary already is - matches return_item()'s identical
-                # reasoning.
-                owning_wo_id = locked_item.work_order_line_item.work_order_id
-                if owning_wo_id not in locked_wos:
-                    locked_wos[owning_wo_id] = (
-                        WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
-                    )
-                owning_work_order = locked_wos[owning_wo_id]
+                # actual owning WO (Primary or the specific supplementary) -
+                # already locked above, before any item row, alongside
+                # every other owning WO this box touches.
+                owning_work_order = locked_wos[actual_owner_id]
 
                 Transaction.objects.create(
                     transaction_type=Transaction.TYPE_RETURN,
@@ -997,8 +1083,15 @@ class WorkOrderViewSet(
                     }
                 )
 
-            for touched_work_order in locked_wos.values():
-                self._finalize_return_status(touched_work_order)
+            # WRH-80: same split as return_item() - each touched
+            # supplementary finalizes against its own items only, while the
+            # entry Primary finalizes against the consolidated Primary+
+            # supplementaries count (see _finalize_return_status()'s own
+            # comment for why that split matters).
+            for touched_id, touched_work_order in locked_wos.items():
+                if touched_id != work_order.id:
+                    self._finalize_return_status(touched_work_order)
+            self._finalize_return_status(work_order, allowed_wo_ids, refresh=False)
             _refresh_return_summary(work_order)
 
         return Response(
@@ -1120,7 +1213,14 @@ class WorkOrderViewSet(
 
             work_order.status = WorkOrder.STATUS_CLOSED
             work_order.save(update_fields=["status"])
-            self._refresh_line_items(work_order, _active_line_items_queryset)
+            # WRH-80: WorkOrderReturnSerializer (used below) now also reads
+            # a supplementaries field - _refresh_return_summary() populates
+            # both that and line_items in one prefetch, instead of leaving
+            # supplementaries to fall back to an unannotated default-manager
+            # query (which would render its returned/damaged/still_out
+            # counts as 0 via WorkOrderActiveLineItemSerializer's getattr
+            # fallback, not this WO's real numbers).
+            _refresh_return_summary(work_order)
 
         return Response(
             {
