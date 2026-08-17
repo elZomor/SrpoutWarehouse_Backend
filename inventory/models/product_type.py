@@ -20,6 +20,10 @@ AVAILABLE_COUNT_ANNOTATION = "available_count"
 # TOTAL_COUNT_ANNOTATION but vanishes from every per-status count, so the
 # breakdown no longer sums to the total.
 IN_MAINTENANCE_COUNT_ANNOTATION = "in_maintenance_count"
+# WRH-74: dashboard grid gains a "Written-off" column showing items in
+# STATUS_WRITTEN_OFF - that status existed since WRH-48 but nothing read it
+# until now.
+WRITTEN_OFF_COUNT_ANNOTATION = "written_off_count"
 
 
 class ProductType(models.Model):

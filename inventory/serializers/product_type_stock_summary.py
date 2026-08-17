@@ -8,6 +8,7 @@ from inventory.models.product_type import (
     MISSING_COUNT_ANNOTATION,
     OUT_COUNT_ANNOTATION,
     TOTAL_COUNT_ANNOTATION,
+    WRITTEN_OFF_COUNT_ANNOTATION,
 )
 
 
@@ -28,6 +29,8 @@ class ProductTypeStockSummarySerializer(serializers.ModelSerializer):
     # in-maintenance item stops silently falling out of the per-status
     # breakdown while still counted in total_registered.
     in_maintenance = serializers.SerializerMethodField()
+    # WRH-74: dashboard grid gains a "Written-off" column.
+    written_off = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductType
@@ -40,6 +43,7 @@ class ProductTypeStockSummarySerializer(serializers.ModelSerializer):
             "missing",
             "available",
             "in_maintenance",
+            "written_off",
         ]
 
     def get_total_registered(self, obj):
@@ -59,3 +63,6 @@ class ProductTypeStockSummarySerializer(serializers.ModelSerializer):
 
     def get_in_maintenance(self, obj):
         return getattr(obj, IN_MAINTENANCE_COUNT_ANNOTATION, 0)
+
+    def get_written_off(self, obj):
+        return getattr(obj, WRITTEN_OFF_COUNT_ANNOTATION, 0)

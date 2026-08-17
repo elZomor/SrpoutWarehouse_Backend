@@ -430,6 +430,7 @@ class ProductTypeStockSummaryTests(APITestCase):
         row = self._summary_for(response, product_type.id)
         self.assertEqual(row["total_registered"], 100)
         self.assertEqual(row["available"], 62)
+        self.assertEqual(row["written_off"], 1)
 
     def test_reserved_items_are_not_counted_as_available(self):
         # A reserved item is claimed by an in-progress WO, not free stock -
@@ -474,6 +475,23 @@ class ProductTypeStockSummaryTests(APITestCase):
         self.assertEqual(row["missing"], 0)
         self.assertEqual(row["available"], 0)
         self.assertEqual(row["in_maintenance"], 0)
+        self.assertEqual(row["written_off"], 0)
+
+    def test_written_off_items_are_counted_but_not_available(self):
+        # WRH-74/AC-2/TC-02: a written-off item still shows in
+        # total_registered but has its own bucket, and isn't counted as
+        # available.
+        product_type = ProductTypeFactory(category=self.category)
+        SerializedItemFactory(
+            product_type=product_type, status=SerializedItem.STATUS_WRITTEN_OFF
+        )
+
+        response = self.client.get(reverse("producttype-stock-summary"))
+
+        row = self._summary_for(response, product_type.id)
+        self.assertEqual(row["total_registered"], 1)
+        self.assertEqual(row["written_off"], 1)
+        self.assertEqual(row["available"], 0)
 
     def test_no_product_types_shows_empty_list(self):
         # AC-6/TC-06
