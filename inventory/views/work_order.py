@@ -882,8 +882,13 @@ class WorkOrderViewSet(
             # which then fails this action's own RETURN_ELIGIBLE_STATUSES
             # re-check on the next call and blocks the rest of the
             # consolidated return entirely.
+            # refresh=False on both calls: neither owning_work_order's nor
+            # work_order's own line_items cache is what the response reads
+            # from - _refresh_return_summary(work_order) below repopulates
+            # work_order.line_items and a fresh work_order.supplementaries
+            # (including this owning WO, if it's one) from scratch anyway.
             if owning_work_order.id != work_order.id:
-                self._finalize_return_status(owning_work_order)
+                self._finalize_return_status(owning_work_order, refresh=False)
             self._finalize_return_status(work_order, allowed_wo_ids, refresh=False)
             _refresh_return_summary(work_order)
 
@@ -984,6 +989,11 @@ class WorkOrderViewSet(
             # in ascending id order so two concurrent return_box() calls
             # touching an overlapping set of WOs can't deadlock against each
             # other either.
+            # Only WOs in allowed_wo_ids (the Primary + its supplementaries)
+            # get locked here - an item belonging to some unrelated WO is
+            # out of scope for this return call entirely (rejected below,
+            # same as return_item()'s identical rejection), so that WO must
+            # never be locked or have its status touched by this call.
             peeked_owner_by_item_id = {}
             for item in box_items:
                 if item.work_order_line_item_id:
@@ -991,7 +1001,7 @@ class WorkOrderViewSet(
                         item.work_order_line_item.work_order_id
                     )
             for owning_wo_id in sorted(set(peeked_owner_by_item_id.values())):
-                if owning_wo_id not in locked_wos:
+                if owning_wo_id in allowed_wo_ids and owning_wo_id not in locked_wos:
                     locked_wos[owning_wo_id] = (
                         WorkOrder.objects.select_for_update().get(pk=owning_wo_id)
                     )
@@ -1088,9 +1098,14 @@ class WorkOrderViewSet(
             # entry Primary finalizes against the consolidated Primary+
             # supplementaries count (see _finalize_return_status()'s own
             # comment for why that split matters).
+            # refresh=False throughout: none of these instances' own
+            # line_items caches are what the response reads from -
+            # _refresh_return_summary(work_order) below repopulates
+            # work_order.line_items and a fresh work_order.supplementaries
+            # (including every touched supplementary) from scratch anyway.
             for touched_id, touched_work_order in locked_wos.items():
                 if touched_id != work_order.id:
-                    self._finalize_return_status(touched_work_order)
+                    self._finalize_return_status(touched_work_order, refresh=False)
             self._finalize_return_status(work_order, allowed_wo_ids, refresh=False)
             _refresh_return_summary(work_order)
 

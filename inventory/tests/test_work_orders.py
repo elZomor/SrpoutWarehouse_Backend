@@ -2225,6 +2225,35 @@ class WorkOrderReturnParentOnlyTests(APITestCase):
         self.assertEqual(transactions[primary_item.id], self.primary.id)
         self.assertEqual(transactions[supplementary_item.id], self.supplementary.id)
 
+    def test_return_box_does_not_touch_an_unrelated_work_order_in_the_same_box(self):
+        # WRH-80 review finding: a box item owned by a WO that is neither
+        # the Primary nor one of its supplementaries must be rejected
+        # without locking or mutating that unrelated WO's own status.
+        primary_item = self._out_item(self.primary_line_item)
+        unrelated = WorkOrderFactory(status=WorkOrder.STATUS_FULFILLED)
+        unrelated_line_item = WorkOrderLineItemFactory(
+            work_order=unrelated, product_type=self.product_type
+        )
+        unrelated_item = self._out_item(unrelated_line_item)
+        box = BoxFactory(product_type=self.product_type)
+        SerializedItem.objects.filter(
+            id__in=[primary_item.id, unrelated_item.id]
+        ).update(box=box)
+
+        response = self.return_box_on(self.primary, box.code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = {
+            result["serial_number"]: result
+            for result in response.data["box_summary"]["results"]
+        }
+        self.assertTrue(results[primary_item.serial_number]["added"])
+        self.assertFalse(results[unrelated_item.serial_number]["added"])
+        unrelated_item.refresh_from_db()
+        self.assertEqual(unrelated_item.status, SerializedItem.STATUS_OUT)
+        unrelated.refresh_from_db()
+        self.assertEqual(unrelated.status, WorkOrder.STATUS_FULFILLED)
+
     def test_return_item_still_rejects_a_serial_issued_on_an_unrelated_work_order(
         self,
     ):
