@@ -378,10 +378,15 @@ class WorkOrderReturnSerializer(serializers.ModelSerializer):
     # (WRH-55/AC-2, WRH-57/AC-2), populated for real once return_item()
     # starts flipping items back to available or damaged.
     line_items = WorkOrderActiveLineItemSerializer(many=True, read_only=True)
+    # WRH-80/AC-3: a return initiated on a parent WO is consolidated across
+    # it and every supplementary - same nested shape the "active" list
+    # already uses, so a caller sees each supplementary's own summary
+    # (including its own now-updated status) alongside the parent's.
+    supplementaries = WorkOrderActiveSupplementarySerializer(many=True, read_only=True)
 
     class Meta:
         model = WorkOrder
-        fields = ["id", "job_name", "status", "line_items"]
+        fields = ["id", "job_name", "status", "line_items", "supplementaries"]
 
 
 class WorkOrderDetailSerializedItemSerializer(serializers.ModelSerializer):
