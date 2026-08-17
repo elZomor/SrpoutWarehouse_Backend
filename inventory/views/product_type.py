@@ -15,6 +15,7 @@ from inventory.models.product_type import (
     MISSING_COUNT_ANNOTATION,
     OUT_COUNT_ANNOTATION,
     TOTAL_COUNT_ANNOTATION,
+    WRITTEN_OFF_COUNT_ANNOTATION,
 )
 from inventory.serializers import (
     ProductTypeSerializer,
@@ -100,6 +101,12 @@ class ProductTypeViewSet(
                             serialized_items__status=(
                                 SerializedItem.STATUS_IN_MAINTENANCE
                             )
+                        ),
+                    ),
+                    WRITTEN_OFF_COUNT_ANNOTATION: Count(
+                        "serialized_items",
+                        filter=Q(
+                            serialized_items__status=(SerializedItem.STATUS_WRITTEN_OFF)
                         ),
                     ),
                 }
