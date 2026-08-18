@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.db.models import Prefetch
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -19,7 +20,13 @@ class MaintenanceOrderViewSet(
     # resolve() action below; WRH-47 (US-022b) adds the eligibility/
     # terminal-state business-rule guards on top of both.
     permission_classes = [IsAuthenticated]
-    queryset = MaintenanceOrder.objects.prefetch_related("items", "notes")
+    queryset = MaintenanceOrder.objects.prefetch_related(
+        "items",
+        Prefetch(
+            "notes",
+            queryset=MaintenanceOrderNote.objects.select_related("item", "user"),
+        ),
+    )
     serializer_class = MaintenanceOrderSerializer
 
     @action(detail=True, methods=["post"])
