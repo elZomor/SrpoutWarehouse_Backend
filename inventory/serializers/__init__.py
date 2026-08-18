@@ -6,6 +6,7 @@ from inventory.serializers.damage_report import (
     DamageReportSerializer,
 )
 from inventory.serializers.maintenance_order import (
+    MaintenanceOrderNoteSerializer,
     MaintenanceOrderResolveSerializer,
     MaintenanceOrderSerializer,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "CategorySerializer",
     "DamageReportCreateSerializer",
     "DamageReportSerializer",
+    "MaintenanceOrderNoteSerializer",
     "MaintenanceOrderResolveSerializer",
     "MaintenanceOrderSerializer",
     "MissingItemSerializer",

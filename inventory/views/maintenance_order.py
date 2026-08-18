@@ -1,11 +1,12 @@
 from django.db import transaction
+from django.db.models import Prefetch
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from inventory.models import MaintenanceOrder, SerializedItem
+from inventory.models import MaintenanceOrder, MaintenanceOrderNote, SerializedItem
 from inventory.serializers import (
     MaintenanceOrderResolveSerializer,
     MaintenanceOrderSerializer,
@@ -19,7 +20,13 @@ class MaintenanceOrderViewSet(
     # resolve() action below; WRH-47 (US-022b) adds the eligibility/
     # terminal-state business-rule guards on top of both.
     permission_classes = [IsAuthenticated]
-    queryset = MaintenanceOrder.objects.prefetch_related("items")
+    queryset = MaintenanceOrder.objects.prefetch_related(
+        "items",
+        Prefetch(
+            "notes",
+            queryset=MaintenanceOrderNote.objects.select_related("item", "user"),
+        ),
+    )
     serializer_class = MaintenanceOrderSerializer
 
     @action(detail=True, methods=["post"])
@@ -34,6 +41,7 @@ class MaintenanceOrderViewSet(
         serializer.is_valid(raise_exception=True)
         item_id = serializer.validated_data["item"].id
         resolution = serializer.validated_data["resolution"]
+        note = serializer.validated_data["note"]
 
         with transaction.atomic():
             # Lock the parent MO row first (matches WorkOrderViewSet's
@@ -74,8 +82,30 @@ class MaintenanceOrderViewSet(
             )
             item.save(update_fields=["status"])
 
+            if note:
+                MaintenanceOrderNote.objects.create(
+                    maintenance_order=maintenance_order,
+                    item=item,
+                    action=(
+                        MaintenanceOrderNote.ACTION_FIXED
+                        if resolution
+                        == MaintenanceOrderResolveSerializer.RESOLUTION_FIXED
+                        else MaintenanceOrderNote.ACTION_WRITTEN_OFF
+                    ),
+                    text=note,
+                    user=request.user,
+                )
+
             self._finalize_resolution_status(maintenance_order)
 
+        # Fresh, single query for the response's related data - the
+        # locked instance above was fetched before this call's own note
+        # (if any) was created, so prefetching onto it would serve a
+        # stale notes list (matches WRH-56's "don't fetch an
+        # already-prefetched instance a second time expecting it to
+        # refresh" lesson: fetch once for the lock/mutation, then one
+        # fresh query scoped to what the response actually needs).
+        maintenance_order = self.get_queryset().get(pk=maintenance_order.pk)
         return Response(MaintenanceOrderSerializer(maintenance_order).data, status=200)
 
     @staticmethod

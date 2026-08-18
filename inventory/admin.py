@@ -5,6 +5,7 @@ from inventory.models import (
     Category,
     DamageReport,
     MaintenanceOrder,
+    MaintenanceOrderNote,
     ProductType,
     PurchaseOrder,
     PurchaseOrderLineItem,
@@ -86,6 +87,12 @@ class DamageReportAdmin(admin.ModelAdmin):
 class MaintenanceOrderAdmin(admin.ModelAdmin):
     list_display = ("reference", "status", "created_at")
     list_filter = ("status",)
+
+
+@admin.register(MaintenanceOrderNote)
+class MaintenanceOrderNoteAdmin(admin.ModelAdmin):
+    list_display = ("maintenance_order", "action", "item", "user", "created_at")
+    list_filter = ("action",)
 
 
 @admin.register(Transaction)
