@@ -98,6 +98,14 @@ class MaintenanceOrderViewSet(
 
             self._finalize_resolution_status(maintenance_order)
 
+        # Fresh, single query for the response's related data - the
+        # locked instance above was fetched before this call's own note
+        # (if any) was created, so prefetching onto it would serve a
+        # stale notes list (matches WRH-56's "don't fetch an
+        # already-prefetched instance a second time expecting it to
+        # refresh" lesson: fetch once for the lock/mutation, then one
+        # fresh query scoped to what the response actually needs).
+        maintenance_order = self.get_queryset().get(pk=maintenance_order.pk)
         return Response(MaintenanceOrderSerializer(maintenance_order).data, status=200)
 
     @staticmethod
