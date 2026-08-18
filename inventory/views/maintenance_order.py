@@ -5,7 +5,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from inventory.models import MaintenanceOrder, SerializedItem
+from inventory.models import MaintenanceOrder, MaintenanceOrderNote, SerializedItem
 from inventory.serializers import (
     MaintenanceOrderResolveSerializer,
     MaintenanceOrderSerializer,
@@ -19,7 +19,7 @@ class MaintenanceOrderViewSet(
     # resolve() action below; WRH-47 (US-022b) adds the eligibility/
     # terminal-state business-rule guards on top of both.
     permission_classes = [IsAuthenticated]
-    queryset = MaintenanceOrder.objects.prefetch_related("items")
+    queryset = MaintenanceOrder.objects.prefetch_related("items", "notes")
     serializer_class = MaintenanceOrderSerializer
 
     @action(detail=True, methods=["post"])
@@ -34,6 +34,7 @@ class MaintenanceOrderViewSet(
         serializer.is_valid(raise_exception=True)
         item_id = serializer.validated_data["item"].id
         resolution = serializer.validated_data["resolution"]
+        note = serializer.validated_data["note"]
 
         with transaction.atomic():
             # Lock the parent MO row first (matches WorkOrderViewSet's
@@ -73,6 +74,20 @@ class MaintenanceOrderViewSet(
                 else SerializedItem.STATUS_WRITTEN_OFF
             )
             item.save(update_fields=["status"])
+
+            if note:
+                MaintenanceOrderNote.objects.create(
+                    maintenance_order=maintenance_order,
+                    item=item,
+                    action=(
+                        MaintenanceOrderNote.ACTION_FIXED
+                        if resolution
+                        == MaintenanceOrderResolveSerializer.RESOLUTION_FIXED
+                        else MaintenanceOrderNote.ACTION_WRITTEN_OFF
+                    ),
+                    text=note,
+                    user=request.user,
+                )
 
             self._finalize_resolution_status(maintenance_order)
 

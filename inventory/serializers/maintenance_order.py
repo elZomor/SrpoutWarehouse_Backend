@@ -1,7 +1,7 @@
 from django.db import transaction
 from rest_framework import serializers
 
-from inventory.models import MaintenanceOrder, SerializedItem
+from inventory.models import MaintenanceOrder, MaintenanceOrderNote, SerializedItem
 
 
 class MaintenanceOrderItemSerializer(serializers.ModelSerializer):
@@ -11,6 +11,26 @@ class MaintenanceOrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = SerializedItem
         fields = ["id", "serial_number", "status"]
+
+
+class MaintenanceOrderNoteSerializer(serializers.ModelSerializer):
+    # WRH-77/AC-4/AC-5: read-only history entry - serial_number is null for
+    # a "created" note (the MO itself is the subject, not one line item).
+    serial_number = serializers.CharField(
+        source="item.serial_number", read_only=True, default=None
+    )
+    user_username = serializers.CharField(source="user.username", read_only=True)
+
+    class Meta:
+        model = MaintenanceOrderNote
+        fields = [
+            "id",
+            "action",
+            "text",
+            "serial_number",
+            "user_username",
+            "created_at",
+        ]
 
 
 class MaintenanceOrderSerializer(serializers.ModelSerializer):
@@ -38,10 +58,18 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
         },
     )
     items = MaintenanceOrderItemSerializer(many=True, read_only=True)
+    # WRH-77/AC-1: optional free-text note captured at creation time -
+    # write-only input, stored as a MaintenanceOrderNote row (not a plain
+    # field on this model) so it joins the same history as the fix/
+    # write-off notes below rather than living in a separate shape.
+    note = serializers.CharField(
+        required=False, allow_blank=True, default="", write_only=True
+    )
+    notes = MaintenanceOrderNoteSerializer(many=True, read_only=True)
 
     class Meta:
         model = MaintenanceOrder
-        fields = ["id", "reference", "status", "item_ids", "items"]
+        fields = ["id", "reference", "status", "item_ids", "items", "note", "notes"]
         read_only_fields = ["status"]
 
     @staticmethod
@@ -117,6 +145,8 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items = validated_data.pop("items")
+        note = validated_data.pop("note")
+        user = self.context["request"].user
         # Both writes must land together - matches BoxSerializer.create()'s
         # identical reasoning for its own two-step nested write. Lock the
         # candidate item rows (order_by pins a deterministic acquisition
@@ -141,6 +171,13 @@ class MaintenanceOrderSerializer(serializers.ModelSerializer):
                 maintenance_order=maintenance_order,
                 status=SerializedItem.STATUS_IN_MAINTENANCE,
             )
+            if note:
+                MaintenanceOrderNote.objects.create(
+                    maintenance_order=maintenance_order,
+                    action=MaintenanceOrderNote.ACTION_CREATED,
+                    text=note,
+                    user=user,
+                )
         return maintenance_order
 
 
@@ -158,3 +195,6 @@ class MaintenanceOrderResolveSerializer(serializers.Serializer):
         error_messages={"does_not_exist": "Item not found."},
     )
     resolution = serializers.ChoiceField(choices=RESOLUTION_CHOICES)
+    # WRH-77/AC-2/AC-3: optional note captured against this specific
+    # fix/write-off action.
+    note = serializers.CharField(required=False, allow_blank=True, default="")

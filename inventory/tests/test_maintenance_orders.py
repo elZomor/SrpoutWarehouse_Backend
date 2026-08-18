@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from inventory.models import MaintenanceOrder, SerializedItem
+from inventory.models import MaintenanceOrder, MaintenanceOrderNote, SerializedItem
 from inventory.tests.factories import (
     BoxFactory,
     MaintenanceOrderFactory,
@@ -280,6 +280,57 @@ class MaintenanceOrderCreationTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_create_mo_with_note_persists_and_returns_it_in_history(self):
+        # WRH-77/TC-01/AC-1/AC-4/AC-5: note saved against the "created"
+        # action, distinct from any per-item resolution note.
+        item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id], "note": "Handle bent on drop"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data["notes"]), 1)
+        self.assertEqual(response.data["notes"][0]["action"], "created")
+        self.assertEqual(response.data["notes"][0]["text"], "Handle bent on drop")
+        self.assertIsNone(response.data["notes"][0]["serial_number"])
+        self.assertEqual(response.data["notes"][0]["user_username"], "jane")
+        maintenance_order = MaintenanceOrder.objects.get(pk=response.data["id"])
+        note = MaintenanceOrderNote.objects.get(maintenance_order=maintenance_order)
+        self.assertEqual(note.action, MaintenanceOrderNote.ACTION_CREATED)
+        self.assertIsNone(note.item_id)
+
+    def test_create_mo_without_note_succeeds_with_no_note_recorded(self):
+        # WRH-77/TC-02: note is optional.
+        item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["notes"], [])
+        self.assertFalse(MaintenanceOrderNote.objects.exists())
+
+    def test_create_mo_note_handles_long_text_and_rtl_arabic_input(self):
+        # WRH-77/TC-06/TC-07: TextField has no max_length; Arabic RTL text
+        # round-trips unmangled.
+        item = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        long_note = ("بند تالف بسبب سوء الاستخدام. " * 500).strip()
+
+        response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item.id], "note": long_note},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["notes"][0]["text"], long_note)
+
     def test_retrieve_update_destroy_routes_are_not_registered(self):
         maintenance_order = MaintenanceOrderFactory()
 
@@ -398,6 +449,98 @@ class MaintenanceOrderResolveTests(APITestCase):
         items[1].refresh_from_db()
         self.assertEqual(items[0].status, SerializedItem.STATUS_AVAILABLE)
         self.assertEqual(items[1].status, SerializedItem.STATUS_WRITTEN_OFF)
+
+    def test_mark_a_line_item_as_fixed_with_a_note(self):
+        # WRH-77/TC-03/AC-2/AC-5: fix note saved against the item, the
+        # earlier create-note (if any) stays untouched/separate.
+        maintenance_order, items = self._create_mo(1)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {
+                "item_id": items[0].id,
+                "resolution": "fixed",
+                "note": "Replaced cracked housing",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        note = MaintenanceOrderNote.objects.get(
+            maintenance_order=maintenance_order,
+            action=MaintenanceOrderNote.ACTION_FIXED,
+        )
+        self.assertEqual(note.text, "Replaced cracked housing")
+        self.assertEqual(note.item_id, items[0].id)
+
+    def test_mark_a_line_item_as_not_fixable_with_a_note(self):
+        # WRH-77/TC-04/AC-3.
+        maintenance_order, items = self._create_mo(1)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {
+                "item_id": items[0].id,
+                "resolution": "not_fixable",
+                "note": "Beyond repair, scrapping",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        note = MaintenanceOrderNote.objects.get(
+            maintenance_order=maintenance_order,
+            action=MaintenanceOrderNote.ACTION_WRITTEN_OFF,
+        )
+        self.assertEqual(note.text, "Beyond repair, scrapping")
+        self.assertEqual(note.item_id, items[0].id)
+
+    def test_resolve_without_note_records_nothing(self):
+        maintenance_order, items = self._create_mo(1)
+
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": items[0].id, "resolution": "fixed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(MaintenanceOrderNote.objects.exists())
+
+    def test_maintenance_order_history_shows_all_three_note_types_distinctly(self):
+        # WRH-77/TC-05: create/fix/write-off notes all preserved separately,
+        # each attributed to its own action, in chronological order.
+        item_a = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        item_b = SerializedItemFactory(status=SerializedItem.STATUS_DAMAGED)
+        create_response = self.client.post(
+            reverse("maintenanceorder-list"),
+            {"item_ids": [item_a.id, item_b.id], "note": "Both damaged in transit"},
+            format="json",
+        )
+        maintenance_order = MaintenanceOrder.objects.get(pk=create_response.data["id"])
+
+        self.client.post(
+            self._resolve_url(maintenance_order),
+            {"item_id": item_a.id, "resolution": "fixed", "note": "Fixed the strap"},
+            format="json",
+        )
+        response = self.client.post(
+            self._resolve_url(maintenance_order),
+            {
+                "item_id": item_b.id,
+                "resolution": "not_fixable",
+                "note": "Scrapped, unrepairable",
+            },
+            format="json",
+        )
+
+        actions = [note["action"] for note in response.data["notes"]]
+        self.assertEqual(actions, ["created", "fixed", "written_off"])
+        texts = [note["text"] for note in response.data["notes"]]
+        self.assertEqual(
+            texts,
+            ["Both damaged in transit", "Fixed the strap", "Scrapped, unrepairable"],
+        )
 
     def test_resolve_rejects_an_item_not_on_this_maintenance_order(self):
         maintenance_order, _ = self._create_mo(1)
