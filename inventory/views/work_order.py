@@ -1289,11 +1289,14 @@ class WorkOrderViewSet(
                 .order_by("created_at", "id")
                 .values_list("serialized_item_id", "transaction_type")
             ):
-                # Matches Transaction.Meta.ordering exactly (its own
-                # declared canonical chronological order) rather than id
-                # alone. Iterating in that order and overwriting per
-                # item_id leaves each item's most recent (TRANSFER-vs-ISSUE)
-                # row standing.
+                # Deliberately ascending (oldest first), NOT
+                # Transaction.Meta.ordering (WRH-78 made that
+                # newest-first) - iterating oldest-to-newest and
+                # overwriting per item_id leaves each item's most recent
+                # (TRANSFER-vs-ISSUE) row standing. Do not drop this
+                # explicit order_by() to rely on the model default; that
+                # would silently flip iteration order and corrupt this
+                # dict with each item's earliest type instead of latest.
                 last_relevant_type_by_item[item_id] = transaction_type
 
             still_out_items = [

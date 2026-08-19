@@ -63,7 +63,10 @@ class Transaction(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
-        ordering = ["created_at", "id"]
+        # WRH-78: list newest-first by default; -id as tiebreaker for equal
+        # timestamps so order stays deterministic (matches -created_at's
+        # direction) instead of falling back to arbitrary DB order.
+        ordering = ["-created_at", "-id"]
 
     def __str__(self):
         return f"{self.get_transaction_type_display()} — {self.serialized_item}"

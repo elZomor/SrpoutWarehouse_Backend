@@ -60,8 +60,8 @@ class TransactionTests(APITestCase):
             self.assertIn(field, first)
 
     def test_filter_by_serial_number_returns_only_that_items_transactions(self):
-        # TC-02/AC-2: only the filtered serial's transactions come back, in
-        # chronological order.
+        # TC-02/AC-2: only the filtered serial's transactions come back,
+        # newest-first (WRH-78).
         target_item = SerializedItemFactory(serial_number="SN-042")
         other_item = SerializedItemFactory(serial_number="SN-099")
         first = TransactionFactory(
@@ -88,7 +88,7 @@ class TransactionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 2)
-        self.assertEqual([row["id"] for row in response.data], [first.id, second.id])
+        self.assertEqual([row["id"] for row in response.data], [second.id, first.id])
 
     def test_filter_by_work_order_reference_returns_only_that_wos_transactions(self):
         # TC-03/AC-3.
@@ -269,8 +269,8 @@ class TransactionTests(APITestCase):
         self.assertEqual(
             returned_types,
             [
-                Transaction.TYPE_RECEIVE,
-                Transaction.TYPE_ISSUE,
                 Transaction.TYPE_RETURN,
+                Transaction.TYPE_ISSUE,
+                Transaction.TYPE_RECEIVE,
             ],
         )
