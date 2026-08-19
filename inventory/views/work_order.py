@@ -185,6 +185,36 @@ def _returnable_work_order_ids(work_order):
     )
 
 
+def _item_owner_id(item):
+    # WRH-82: the "read the owning WO id off a nullable FK" pattern
+    # repeated verbatim (peeked-owner, actual-owner, box owner-set) across
+    # return_item()/return_box() - a shared one-liner instead of
+    # re-deriving it at each call site.
+    return (
+        item.work_order_line_item.work_order_id
+        if item.work_order_line_item_id
+        else None
+    )
+
+
+def _return_ownership_error(
+    item, work_order, actual_owner_id, peeked_owner_id, allowed_wo_ids
+):
+    # WRH-82: shared classification for return_item()/return_box()'s
+    # identical post-lock ownership re-check - out of scope entirely
+    # (never issued on this Primary/its supplementaries) vs. reassigned to
+    # a different (still in-scope) WO in the window between the unlocked
+    # peek and the row lock. Returns None when ownership still checks out.
+    if actual_owner_id is None or actual_owner_id not in allowed_wo_ids:
+        return f"{item.serial_number} was not issued on WO-{work_order.id}"
+    if actual_owner_id != peeked_owner_id:
+        return (
+            f"{item.serial_number} changed work orders while this return"
+            " was in progress - please retry"
+        )
+    return None
+
+
 def _refresh_return_summary(work_order):
     # WRH-80/AC-3: populates both work_order.line_items and
     # work_order.supplementaries (each with their own fresh line_items) in
@@ -789,11 +819,7 @@ class WorkOrderViewSet(
                 ).get(serial_number=serial_number)
             except SerializedItem.DoesNotExist:
                 raise ValidationError({"serial_number": ["Serial not found"]})
-            peeked_owner_id = (
-                item_peek.work_order_line_item.work_order_id
-                if item_peek.work_order_line_item_id
-                else None
-            )
+            peeked_owner_id = _item_owner_id(item_peek)
 
             # WRH-80: when the item is owned by a supplementary (not the
             # already-locked Primary), lock that supplementary's
@@ -823,41 +849,23 @@ class WorkOrderViewSet(
             # changed in the window between the unlocked peek above and
             # this lock (e.g. a concurrent scan() reassigning it), same
             # "re-check after acquiring the lock" convention as the
-            # archived-product-type guard (WRH-56).
-            actual_owner_id = (
-                item.work_order_line_item.work_order_id
-                if item.work_order_line_item_id
-                else None
+            # archived-product-type guard (WRH-56). WRH-80: "was not
+            # issued" message text deliberately unchanged from before that
+            # ticket (no "or its supplementaries" suffix) - the frontend's
+            # NOT_ISSUED_PATTERN regex is end-anchored on exactly this
+            # "...WO-<id>" shape. The "changed work orders" branch covers
+            # reassignment to a different (still allowed) WO between the
+            # peek and the lock - owning_work_order was locked for the
+            # wrong row, and rather than lock another row inside this
+            # already-open transaction (which could itself deadlock), this
+            # rejects the scan cleanly; a retry re-peeks and locks
+            # correctly.
+            actual_owner_id = _item_owner_id(item)
+            ownership_error = _return_ownership_error(
+                item, work_order, actual_owner_id, peeked_owner_id, allowed_wo_ids
             )
-            if actual_owner_id is None or actual_owner_id not in allowed_wo_ids:
-                # WRH-80: message text deliberately unchanged from before
-                # this ticket (no "or its supplementaries" suffix) - the
-                # frontend's NOT_ISSUED_PATTERN regex is end-anchored on
-                # exactly this "...WO-<id>" shape and this exact rejection
-                # already fires for the plain, non-consolidated case too.
-                raise ValidationError(
-                    {
-                        "serial_number": [
-                            f"{item.serial_number} was not issued on"
-                            f" WO-{work_order.id}"
-                        ]
-                    }
-                )
-            if actual_owner_id != peeked_owner_id:
-                # The item was reassigned to a different (still allowed)
-                # WO between the peek and the lock - owning_work_order was
-                # locked for the wrong row. Rather than lock another row
-                # inside this already-open transaction (which could itself
-                # deadlock), reject this scan cleanly; a retry re-peeks
-                # and locks correctly.
-                raise ValidationError(
-                    {
-                        "serial_number": [
-                            f"{item.serial_number} changed work orders while"
-                            " this return was in progress - please retry"
-                        ]
-                    }
-                )
+            if ownership_error:
+                raise ValidationError({"serial_number": [ownership_error]})
             if item.status == SerializedItem.STATUS_DAMAGED:
                 # WRH-39/AC-6: already flagged damaged (by a prior scan
                 # through this same action's damaged=True branch below, or
@@ -941,11 +949,18 @@ class WorkOrderViewSet(
             # from - _refresh_return_summary(work_order) below repopulates
             # work_order.line_items and a fresh work_order.supplementaries
             # (including this owning WO, if it's one) from scratch anyway.
+            # WRH-82: reuse allowed_wo_ids (computed once above) rather
+            # than re-querying it - owning_work_order's own finalize just
+            # above can only move it to STATUS_RETURNED (0 items left out,
+            # so its membership in this list no longer affects the count
+            # either way) or leave it at STATUS_PARTIALLY_RETURNED
+            # (unchanged membership), so a stale list here is equivalent
+            # to a freshly recomputed one.
             if owning_work_order.id != work_order.id:
                 self._finalize_return_status(owning_work_order, refresh=False)
             self._finalize_return_status(
                 work_order,
-                _returnable_work_order_ids(work_order),
+                allowed_wo_ids,
                 refresh=False,
             )
             _refresh_return_summary(work_order)
@@ -1072,10 +1087,17 @@ class WorkOrderViewSet(
             # out of scope for this return call entirely (rejected below,
             # same as return_item()'s identical rejection), so that WO must
             # never be locked or have its status touched by this call.
+            # WRH-82: kept per-item (not just the deduped id set below) so
+            # each item's own post-lock recheck can tell "reassigned since
+            # the peek" apart from "never in scope" - same distinction
+            # return_item() draws via its single peeked_owner_id.
+            peeked_owner_by_item_id = {
+                item.pk: _item_owner_id(item) for item in box_items
+            }
             peeked_owner_ids = {
-                item.work_order_line_item.work_order_id
-                for item in box_items
-                if item.work_order_line_item_id
+                owner_id
+                for owner_id in peeked_owner_by_item_id.values()
+                if owner_id is not None
             }
             for owning_wo_id in sorted(peeked_owner_ids):
                 if owning_wo_id in allowed_wo_ids and owning_wo_id not in locked_wos:
@@ -1089,28 +1111,30 @@ class WorkOrderViewSet(
                 # have changed since the unlocked peek above (e.g. a
                 # concurrent scan() reassigning it), same "re-check after
                 # acquiring the lock" convention as the archived-guard
-                # (WRH-56). A reassignment to a WO this call didn't peek
-                # (and so didn't lock) is rejected rather than locked here,
-                # for the same reason return_item() rejects instead of
-                # locking mid-loop.
-                actual_owner_id = (
-                    locked_item.work_order_line_item.work_order_id
-                    if locked_item.work_order_line_item_id
-                    else None
+                # (WRH-56) and the same shared classification return_item()
+                # uses (WRH-82) - "not issued" for out-of-scope, "changed
+                # work orders...retry" for a reassignment within scope that
+                # this call didn't peek/lock for. A reassignment to a WO
+                # this call didn't peek (and so didn't lock) is rejected
+                # rather than locked here, for the same reason return_item()
+                # rejects instead of locking mid-loop - it necessarily
+                # differs from its own peeked_owner_id, so
+                # _return_ownership_error catches it without needing an
+                # explicit "not in locked_wos" check.
+                actual_owner_id = _item_owner_id(locked_item)
+                ownership_error = _return_ownership_error(
+                    locked_item,
+                    work_order,
+                    actual_owner_id,
+                    peeked_owner_by_item_id[item.pk],
+                    allowed_wo_ids,
                 )
-                if (
-                    actual_owner_id is None
-                    or actual_owner_id not in allowed_wo_ids
-                    or actual_owner_id not in locked_wos
-                ):
+                if ownership_error:
                     results.append(
                         {
                             "serial_number": locked_item.serial_number,
                             "added": False,
-                            "reason": (
-                                f"{locked_item.serial_number} was not issued on"
-                                f" WO-{work_order.id}"
-                            ),
+                            "reason": ownership_error,
                         }
                     )
                     continue
@@ -1191,12 +1215,14 @@ class WorkOrderViewSet(
             # _refresh_return_summary(work_order) below repopulates
             # work_order.line_items and a fresh work_order.supplementaries
             # (including every touched supplementary) from scratch anyway.
+            # WRH-82: reuse allowed_wo_ids (computed once above) - same
+            # reasoning as return_item()'s identical reuse.
             for touched_id in actually_returned_wo_ids:
                 if touched_id != work_order.id:
                     self._finalize_return_status(locked_wos[touched_id], refresh=False)
             self._finalize_return_status(
                 work_order,
-                _returnable_work_order_ids(work_order),
+                allowed_wo_ids,
                 refresh=False,
             )
             _refresh_return_summary(work_order)
