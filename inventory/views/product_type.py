@@ -30,8 +30,12 @@ class ProductTypeViewSet(
     viewsets.GenericViewSet,
 ):
     # WRH-20 (PRD story US-002a) scoped create/list/search. WRH-21
-    # (US-002b) adds delete-protection/archive; retrieve/update still
-    # aren't needed by any story yet, so those routes stay unregistered.
+    # (US-002b) added delete-protection; retrieve/update still aren't
+    # needed by any story yet, so those routes stay unregistered. The
+    # archive action (also from WRH-21) was removed by WRH-73; the
+    # `archived` field/filter stays as the only way to retire a product
+    # type that still has SerializedItems registered (delete is
+    # PROTECT-blocked).
     permission_classes = [IsAuthenticated]
     # select_related avoids an N+1 query per row: CategorySerializer's
     # category_name field reads category.name on every serialized instance.
@@ -115,7 +119,7 @@ class ProductTypeViewSet(
 
     def filter_queryset(self, queryset):
         # SearchFilter is only meant to scope the list endpoint. GenericAPIView
-        # .get_object() (used by destroy/archive) also runs filter_queryset()
+        # .get_object() (used by destroy) also runs filter_queryset()
         # before its pk lookup, so leaving it active there would 404 a
         # perfectly valid product type whenever the request carries a stray
         # ?search= param that doesn't match its name.
@@ -137,7 +141,8 @@ class ProductTypeViewSet(
             {
                 "detail": (
                     f"Cannot delete — {registered_count} {noun} {verb} "
-                    "registered under this product type. Archive it instead."
+                    "registered under this product type. Reassign or remove "
+                    "them first."
                 ),
                 "registered_item_count": registered_count,
             },
@@ -145,8 +150,7 @@ class ProductTypeViewSet(
         )
 
     def destroy(self, request, *args, **kwargs):
-        # AC-3/AC-5: only delete when no SerializedItems are registered;
-        # otherwise the manager must archive instead.
+        # AC-3/AC-5: only delete when no SerializedItems are registered.
         instance = self.get_object()
         registered_count = instance.serialized_items.count()
         if registered_count:
@@ -160,15 +164,6 @@ class ProductTypeViewSet(
             # of leaving the race to surface as an unhandled 500.
             return self._delete_blocked_response(instance.serialized_items.count())
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=True, methods=["post"])
-    def archive(self, request, pk=None):
-        # AC-4: archiving retires a product type without touching its
-        # existing SerializedItems or their history.
-        product_type = self.get_object()
-        product_type.archived = True
-        product_type.save(update_fields=["archived"])
-        return Response(self.get_serializer(product_type).data)
 
     def get_serializer_class(self):
         if self.action == "stock_summary":

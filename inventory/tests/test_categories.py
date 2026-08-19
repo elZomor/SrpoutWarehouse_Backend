@@ -70,11 +70,11 @@ class CategoryTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_retrieve_and_update_routes_are_not_registered(self):
-        # CategoryViewSet mixes in list/create/destroy plus the archive
-        # action (WRH-62), so the detail route now exists (DELETE works)
-        # but retrieve/update aren't needed by any story yet - GET/PUT/PATCH
-        # correctly 405 (method not allowed on an existing route) rather
-        # than 404 (route doesn't exist at all).
+        # CategoryViewSet mixes in list/create/destroy (WRH-62), so the
+        # detail route now exists (DELETE works) but retrieve/update aren't
+        # needed by any story yet - GET/PUT/PATCH correctly 405 (method not
+        # allowed on an existing route) rather than 404 (route doesn't
+        # exist at all).
         category = CategoryFactory()
         detail_url = f"/api/categories/{category.pk}/"
 
@@ -127,7 +127,7 @@ class CategoryTests(APITestCase):
         self.assertEqual(
             response.data["detail"],
             "Cannot delete — 3 product types are assigned to this category. "
-            "Archive it instead.",
+            "Reassign or remove them first.",
         )
         self.assertEqual(response.data["assigned_product_type_count"], 3)
         self.assertTrue(Category.objects.filter(pk=category.pk).exists())
@@ -144,7 +144,7 @@ class CategoryTests(APITestCase):
         self.assertEqual(
             response.data["detail"],
             "Cannot delete — 1 product type is assigned to this category. "
-            "Archive it instead.",
+            "Reassign or remove them first.",
         )
 
     def test_delete_category_with_zero_product_types_succeeds(self):
@@ -169,14 +169,16 @@ class CategoryTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Category.objects.filter(pk=category.pk).exists())
 
-    def test_archive_with_unrelated_search_query_param_still_succeeds(self):
+    def test_archive_endpoint_is_removed(self):
+        # WRH-73: the archive action/route no longer exists - the
+        # `archived` field/filter themselves stay (admin-editable only).
         category = CategoryFactory(name="Lighting")
 
-        response = self.client.post(
-            f"/api/categories/{category.pk}/archive/", {"search": "does-not-match"}
-        )
+        response = self.client.post(f"/api/categories/{category.pk}/archive/")
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        category.refresh_from_db()
+        self.assertFalse(category.archived)
 
     def test_delete_race_with_concurrent_assignment_is_blocked_not_500(self):
         # AC-3: if a Product Type gets assigned between the count() check and
@@ -194,20 +196,6 @@ class CategoryTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("assigned_product_type_count", response.data)
         self.assertTrue(Category.objects.filter(pk=category.pk).exists())
-
-    def test_archive_category_keeps_product_types_intact(self):
-        # AC-4/TC-04
-        category = CategoryFactory()
-        product_type = ProductTypeFactory(category=category)
-
-        response = self.client.post(f"/api/categories/{category.pk}/archive/")
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(response.data["archived"])
-        category.refresh_from_db()
-        self.assertTrue(category.archived)
-        product_type.refresh_from_db()
-        self.assertEqual(product_type.category_id, category.id)
 
     def test_archived_category_hidden_from_default_list(self):
         # AC-4/AC-6/TC-06: same list endpoint backs the active-list view
