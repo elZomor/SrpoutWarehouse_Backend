@@ -94,7 +94,8 @@ class ProductTypeTests(APITestCase):
             {"name": "Bar LED Model A", "category": self.category.id},
         )
         created_id = response.data["id"]
-        self.client.post(f"/api/categories/{self.category.id}/archive/")
+        self.category.archived = True
+        self.category.save(update_fields=["archived"])
 
         list_response = self.client.get(reverse("producttype-list"))
 
