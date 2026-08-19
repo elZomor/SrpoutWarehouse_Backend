@@ -1,6 +1,5 @@
 from django.db.models import ProtectedError
 from rest_framework import mixins, status, viewsets
-from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -16,8 +15,11 @@ class CategoryViewSet(
     viewsets.GenericViewSet,
 ):
     # WRH-61 (PRD story US-026a) scoped create/list/search. WRH-62
-    # (US-026b) adds delete-protection/archive; retrieve/update still
-    # aren't needed by any story yet, so those routes stay unregistered.
+    # (US-026b) added delete-protection; retrieve/update still aren't
+    # needed by any story yet, so those routes stay unregistered. The
+    # archive action (also from WRH-62) was removed by WRH-73; the
+    # `archived` field/filter stays as the only way to retire a category
+    # that still has Product Types assigned (delete is PROTECT-blocked).
     permission_classes = [IsAuthenticated]
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
@@ -35,7 +37,7 @@ class CategoryViewSet(
 
     def filter_queryset(self, queryset):
         # SearchFilter is only meant to scope the list endpoint. GenericAPIView
-        # .get_object() (used by destroy/archive) also runs filter_queryset()
+        # .get_object() (used by destroy) also runs filter_queryset()
         # before its pk lookup, so leaving it active there would 404 a
         # perfectly valid category whenever the request carries a stray
         # ?search= param that doesn't match its name.
@@ -57,7 +59,7 @@ class CategoryViewSet(
             {
                 "detail": (
                     f"Cannot delete — {assigned_count} {noun} {verb} "
-                    "assigned to this category. Archive it instead."
+                    "assigned to this category. Reassign or remove them first."
                 ),
                 "assigned_product_type_count": assigned_count,
             },
@@ -65,8 +67,7 @@ class CategoryViewSet(
         )
 
     def destroy(self, request, *args, **kwargs):
-        # AC-3/AC-5: only delete when no Product Types are assigned;
-        # otherwise the manager must archive instead.
+        # AC-3/AC-5: only delete when no Product Types are assigned.
         instance = self.get_object()
         assigned_count = instance.product_types.count()
         if assigned_count:
@@ -80,12 +81,3 @@ class CategoryViewSet(
             # race to surface as an unhandled 500.
             return self._delete_blocked_response(instance.product_types.count())
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=True, methods=["post"])
-    def archive(self, request, pk=None):
-        # AC-4: archiving retires a category without touching its
-        # existing Product Types or their history.
-        category = self.get_object()
-        category.archived = True
-        category.save(update_fields=["archived"])
-        return Response(self.get_serializer(category).data)
